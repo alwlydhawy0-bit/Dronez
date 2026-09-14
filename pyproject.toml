@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dronez"
+version = "0.0.0"
+description = "Tactical Drone Swarm & Recon MCP Server — reconnaissance-only, high-assurance"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+# Milestone-0 runtime code is deliberately stdlib-only: the smallest possible
+# supply-chain surface (Zero-Trust Standard Sec.6.2), and it lets the schema and
+# clearance logic be fuzzed as pure functions. FastAPI, Pydantic and the OPA client
+# arrive with the MCP server at Milestone 1, pinned by a committed lockfile.
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"dronez.airspace" = ["schemas/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-q --strict-markers"
+filterwarnings = ["error"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "S", "UP", "RUF"]
+# S101: pytest relies on assert. The narrowing asserts in schema.py are type
+# refinements for mypy; the enforcing checks there are explicit raises, never asserts.
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+mypy_path = "src"
+warn_unreachable = true

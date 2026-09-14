@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Test & type caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+coverage.xml
+
+# Secrets and key material. Nothing in these patterns is ever committed
+# (Zero-Trust Standard Sec.6.1: zero hardcoded keys in git).
+*.pem
+*.key
+*.p12
+*.pfx
+.env
+.env.*
+!.env.example
+secrets/
+*.tfvars
+!*.tfvars.example
+
+# Terraform state -- contains resource metadata and occasionally secrets.
+.terraform/
+*.tfstate
+*.tfstate.*
+
+# Local tooling
+.DS_Store
+.idea/
+.vscode/

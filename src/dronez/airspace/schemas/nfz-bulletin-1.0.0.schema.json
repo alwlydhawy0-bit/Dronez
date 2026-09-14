@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dronez.internal/schemas/nfz-bulletin-1.0.0.schema.json",
+  "title": "Sovereign NFZ / GACA Airspace Bulletin",
+  "description": "Published wire contract for the sovereign No-Fly-Zone sync channel. This document is the interface agreed with the issuing authority. The ENFORCING implementation is dronez.airspace.schema.parse_bulletin, which is stricter than this file (it additionally checks cross-field invariants such as authority consistency and altitude ordering). Where the two disagree, the Python validator wins and the discrepancy is a defect to be fixed here.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bulletin_id",
+    "schema_version",
+    "authority",
+    "sequence",
+    "issued_utc",
+    "valid_until_utc",
+    "zones",
+    "signature"
+  ],
+  "properties": {
+    "bulletin_id": { "$ref": "#/$defs/identifier" },
+    "schema_version": {
+      "type": "string",
+      "pattern": "^nfz-bulletin/1\\.[0-9]+\\.[0-9]+$",
+      "description": "Major version must match the implementing build; a mismatch fails closed."
+    },
+    "authority": {
+      "type": "string",
+      "maxLength": 64,
+      "description": "Issuing authority. Must match the authority bound to the verification key."
+    },
+    "sequence": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per authority. A bulletin whose sequence is not strictly greater than the last accepted one is rejected as a replay."
+    },
+    "issued_utc": { "$ref": "#/$defs/timestamp" },
+    "valid_until_utc": { "$ref": "#/$defs/timestamp" },
+    "full_snapshot": {
+      "type": "boolean",
+      "default": true,
+      "description": "true: zones replace the cache wholesale. false: delta - apply revoked_zone_ids then upsert zones."
+    },
+    "zones": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": { "$ref": "#/$defs/airspaceZone" }
+    },
+    "revoked_zone_ids": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": { "$ref": "#/$defs/identifier" },
+      "description": "Delta bulletins only. A zone may not be both published and revoked in one bulletin."
+    },
+    "signature": { "$ref": "#/$defs/signature" }
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "maxLength": 64,
+      "description": "ISO-8601 with an explicit UTC offset. A naive timestamp is rejected."
+    },
+    "position": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": [
+        { "type": "number", "minimum": -180, "maximum": 180 },
+        { "type": "number", "minimum": -90, "maximum": 90 }
+      ],
+      "description": "WGS-84 [longitude, latitude]. Altitude is carried by the zone's band, never per-position."
+    },
+    "polygon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "coordinates"],
+      "properties": {
+        "type": { "const": "Polygon" },
+        "coordinates": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "items": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 2000,
+            "items": { "$ref": "#/$defs/position" },
+            "description": "Explicitly closed ring: first position equals last."
+          }
+        }
+      }
+    },
+    "airspaceZone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "zone_id",
+        "authority",
+        "designation",
+        "zone_type",
+        "severity",
+        "geometry",
+        "altitude_floor_m_agl",
+        "altitude_ceiling_m_agl",
+        "effective_from",
+        "source_ref"
+      ],
+      "properties": {
+        "zone_id": { "$ref": "#/$defs/identifier" },
+        "authority": { "type": "string", "maxLength": 64 },
+        "designation": {
+          "type": "string",
+          "maxLength": 512,
+          "description": "UNTRUSTED free text from an external party. Display only, escaped at render time. Never interpreted as an instruction and never placed in an LLM context without an untrusted-content label (Zero-Trust 4.2)."
+        },
+        "zone_type": {
+          "type": "string",
+          "enum": [
+            "prohibited",
+            "restricted",
+            "danger",
+            "temporary_restriction",
+            "aerodrome",
+            "critical_infrastructure",
+            "emergency_management",
+            "military"
+          ],
+          "description": "An unrecognised value is rejected, never coerced to 'unrestricted'."
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["blocking", "advisory"],
+          "description": "An unrecognised value is rejected, never downgraded to 'advisory'."
+        },
+        "geometry": { "$ref": "#/$defs/polygon" },
+        "altitude_floor_m_agl": { "type": "number", "minimum": -500, "maximum": 20000 },
+        "altitude_ceiling_m_agl": { "type": "number", "minimum": -500, "maximum": 20000 },
+        "effective_from": { "$ref": "#/$defs/timestamp" },
+        "effective_until": {
+          "oneOf": [{ "$ref": "#/$defs/timestamp" }, { "type": "null" }],
+          "description": "null means open-ended."
+        },
+        "source_ref": { "type": "string", "maxLength": 512 },
+        "remarks": { "type": "string", "maxLength": 512, "default": "" }
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_id", "value"],
+      "properties": {
+        "algorithm": {
+          "type": "string",
+          "enum": ["hmac-sha256", "ed25519"],
+          "description": "Allow-list only. This field SELECTS a verifier the receiver already trusts; it never supplies one. 'none' and any unlisted value are rejected before comparison."
+        },
+        "key_id": {
+          "$ref": "#/$defs/identifier",
+          "description": "Looked up in a known-key registry only. Never used to build a path, URL, or query."
+        },
+        "value": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Covers the canonical JSON of the bulletin with signature.value removed, so algorithm and key_id are themselves signed."
+        }
+      }
+    }
+  }
+}

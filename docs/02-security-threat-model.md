@@ -407,10 +407,27 @@ Threats already exercised by automated tests in this repository:
 | T-40 | `adversarial/test_nfz_fail_closed.py::test_oversized_bulletin_is_refused_without_parsing` |
 | T-41 | `adversarial/test_nfz_fail_closed.py::test_clearance_expires_and_cannot_be_replayed_at_dispatch` |
 | All TB6 | `adversarial/test_nfz_fail_closed.py::test_no_fault_mode_yields_an_affirmative_clearance` |
+| T-08, T-15 | `unit/test_schemas.py::test_agent_cannot_construct_a_signed_envelope` + `test_agent_can_never_override_anything` |
+| T-09, T-10 | `adversarial/test_guardrails.py::test_indirect_injection_is_screened_on_every_inbound_channel` |
+| T-12 | `adversarial/test_guardrails.py::test_agent_output_is_screened_for_exfiltration` |
+| T-13 | `adversarial/test_guardrails.py::test_rejected_proposals_still_consume_the_budget` |
+| T-14 | `unit/test_schemas.py::test_agent_cannot_be_scoped_to_human_only_tools` |
+| T-16 | `adversarial/test_guardrails.py::test_classifier_unavailable_blocks` + the Llama Guard unparseable-verdict cases |
+| T-17 | `unit/test_schemas.py::test_zone_cannot_widen_the_platform_envelope` + `test_envelope_bounds_are_enforced_at_the_type_level` |
+| T-18 | `unit/test_schemas.py::test_accepted_proposal_always_requires_confirmation` |
+| T-19 | `policy/test_policy_engine.py::test_every_failure_mode_denies` |
+| T-20 | `unit/test_schemas.py::test_rejected_proposal_cannot_carry_a_partial_plan` |
+| T-37 (schema) | `unit/test_schemas.py::test_undeclared_field_is_rejected` |
+| T-41 | `policy/test_policy_bundle.py::test_clearance_policy_binds_the_decision_to_the_requested_volume` |
+| T-43, T-47 | `unit/test_schemas.py::test_accepted_stream_must_declare_dtls_and_edge_hashing` |
 
-**Not yet covered by automated tests:** every threat on TB1, TB2, TB3, TB5, TB7 and the
-cross-cutting set. Those boundaries are specified but not implemented at Milestone 0. Each
-becomes a release gate at its milestone per ZT §11.1.
+**Not yet covered by automated tests:** TB5 and TB7 in full, and the cross-cutting set. Those
+boundaries are specified but not implemented. Each becomes a release gate at its milestone per
+ZT §11.1.
+
+**Covered only structurally:** the Rego policies behind TB4 are checked for structure by
+`policy/test_policy_bundle.py`, but have never been *executed* — see `TM-13`. Their semantic
+verification is `scripts/verify_policies.sh`, which CI must run with `--require-opa`.
 
 ---
 
@@ -421,8 +438,8 @@ flight-capable code is written.**
 
 | ID | Item | Disposition | Target |
 | --- | --- | --- | --- |
-| `TM-01` | `IncidentZone` model not finalized — the root authorization envelope is undefined | **Open — blocks M0 gate** | M0 |
-| `TM-02` | Policy-engine schema undefined; `src/dronez/policy/` empty | **Open — blocks M0 gate** | M0 |
+| `TM-01` | `IncidentZone` model not finalized — the root authorization envelope is undefined | **Implemented**, awaiting review sign-off | M0 |
+| `TM-02` | Policy-engine schema undefined | **Implemented** (Rego bundle), awaiting review and `opa test` | M0 |
 | `TM-03` | Safety-envelope constants unreviewed; no named accountable owner | **Open — blocks M0 gate** | M0 |
 | `TM-04` | NFZ channel has no live sovereign endpoint; only the mock is exercised | **Open — blocks M0 gate** | M0 |
 | `TM-05` | `ed25519` signing allow-listed but not implemented | **Mitigated, fails closed** — an `ed25519` bulletin is rejected explicitly, never accepted unverified | M1 |
@@ -433,6 +450,10 @@ flight-capable code is written.**
 | `TM-10` | Adversarial prompt-injection/jailbreak corpus does not exist | **Open** — release-blocking per ZT §11.1 | M5 |
 | `TM-11` | GACA registration and spectrum licensing not initiated | **Open — organizational, blocks M0 gate** | M0 |
 | `TM-12` | No HIL rig; "server disconnected, fail-safe still works" cannot yet be tested | **Open** — the single most important test in the programme | M1 |
+| `TM-13` | **The Rego bundle has never been executed** — `opa` is unavailable in the build environment (blocked by egress policy) | **Open — blocks M0 criterion 6.** Partially mitigated: an unloadable policy leaves the decision path undefined, which the client treats as a denial, so the failure mode is an outage rather than a bypass | M1 |
+| `TM-14` | Command signature **verification** not implemented — the schema defines the shape, nothing checks the cryptography | **Open** — a forged signature would currently parse | M1 |
+| `TM-15` | No nonce store, so an exact replay inside the signature validity window is not rejected | **Open** | M1 |
+| `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Accepted, not load-bearing** — the deterministic gate is what must hold (§5.1) | M5 |
 
 ---
 

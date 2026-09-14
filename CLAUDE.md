@@ -5,9 +5,13 @@
 > later engineering or AI-agent session inherits them instead of re-deriving — or silently
 > re-relaxing — a safety decision that is already settled.
 >
-> **Status: Milestone 0 (pre-engineering). The gate is OPEN — it has not closed.**
-> Section 2 lists what may and may not be built right now. It is the shortest section and
-> the one that binds hardest.
+> **Status: Milestone 0 gate OPEN. Milestone-1 validation and authorization layers built.**
+> Three Milestone-0 criteria remain open (§2) and **no flight-capable code has been
+> written**. The Milestone-1 work delivered so far — strict tool schemas, the prompt
+> sanitizer and rate limits, and the deterministic policy engine — is validation and
+> authorization only: nothing in this repository actuates hardware. Section 2 lists what
+> may and may not be built right now. It is the shortest section and the one that binds
+> hardest.
 
 ---
 
@@ -69,26 +73,27 @@ physical safety envelope depended on the AI agent behaving correctly:
 | 1 | STRIDE threat model for the full agent→MCP→hardware chain | **Drafted** — [`docs/02-security-threat-model.md`](docs/02-security-threat-model.md). Needs security review sign-off. |
 | 2 | Safety-envelope constants defined and reviewed by a **named accountable owner** | **Defined, NOT signed off.** See §4. |
 | 3 | Encrypted sync channel to sovereign NFZ databases established and tested | **Schema + fail-closed client + mock: done.** Live sovereign endpoint: not connected. See §8. |
-| 4 | `IncidentZone` / `AirspaceZone` data model finalized | `AirspaceZone` **done** (§5.3). `IncidentZone` **outstanding**. |
+| 4 | `IncidentZone` / `AirspaceZone` data model finalized | **Both implemented** — `AirspaceZone` (§5.3), `IncidentZone` in `mcp_server/schemas/incident_zone.py`. Awaiting review sign-off. |
 | 5 | GACA registration and spectrum licensing **initiated** | **Not started** — organizational, not an engineering task. See §8. |
-| 6 | Policy-engine schema defined | **Outstanding.** `src/dronez/policy/` is intentionally empty. |
+| 6 | Policy-engine schema defined | **Implemented** — Rego bundle in `policy_engine/policies/`. Awaiting review **and** an `opa test` run (`TM-13`). |
 
 ### 2.1 STOP rules
 
 Do **not**, in this repository, until the gate closes and this file says so:
 
 - Write anything that commands, arms, or actuates hardware — no MAVLink/ROS2 publisher, no
-  `deploy_recon_waypoint` implementation, no flight-controller bridge.
-- Implement an MCP tool endpoint. Tool *contracts* (§5) are specification; implementing one is
-  Milestone 1.
+  dispatcher, no flight-controller bridge. **This is the line the Milestone-1 work stops at:**
+  a proposal can now be validated and authorized, and then it goes nowhere.
+- Wire an MCP tool endpoint to a dispatch path. The schemas in `mcp_server/schemas/` define the
+  contracts; serving them is fine, *acting* on an approval is not.
 - Wire an LLM or agent SDK into this repository. The agent lives in a separate service and has
-  no direct actuation path.
-- Import an LLM client into `src/dronez/policy/`. Ever. Authorization is deterministic code
+  no direct actuation path. The sanitizer is a client of an isolated service, not an agent.
+- Import an LLM client into `src/policy_engine/`. Ever. Authorization is deterministic code
   reading structured input — never a model call.
 - Treat the envelope in §4 as approved. It is proposed. Criterion 2 is open.
 
-**Permitted now:** schemas, data models, threat modelling, the NFZ channel, the policy-engine
-*schema*, test harnesses, simulation scaffolding, infrastructure-as-code, documentation.
+**Permitted now:** schemas, data models, threat modelling, the NFZ channel, the policy engine,
+guardrails, test harnesses, simulation scaffolding, infrastructure-as-code, documentation.
 
 ---
 
@@ -268,16 +273,24 @@ A kinetic bound with a `server`-only locus is a design defect, and
 
 | Artifact | Version | State | Location |
 | --- | --- | --- | --- |
-| Safety envelope | `safety-envelope/1.0.0` | **Implemented** | `src/dronez/safety/envelope.py` |
-| NFZ bulletin wire contract | `nfz-bulletin/1.0.0` | **Implemented** | `src/dronez/airspace/schema.py` + `schemas/nfz-bulletin-1.0.0.schema.json` |
-| `check_airspace_clearance` | `1.0.0-draft` | **Decision logic implemented**, not yet exposed as an MCP endpoint | `src/dronez/airspace/client.py` |
-| `deploy_recon_waypoint` | `1.0.0-draft` | **Specified only** (§5.2) — Milestone 1 | — |
-| `confirm_flight_plan` | `1.0.0-draft` | Specified only — Milestone 1 | — |
-| `execute_safe_return` | `1.0.0-draft` | Specified only — Milestone 1 | — |
-| `stream_thermal_feed` | `1.0.0-draft` | Specified only — Milestone 2 | — |
-| `get_fleet_status` | `1.0.0-draft` | Specified only — Milestone 3 | — |
-| `request_emergency_stop` | `1.0.0-draft` | Specified only — Milestone 4 | — |
-| `get_airspace_status` | `1.0.0-draft` | Specified only — read-only display, **never** a dispatch gate | — |
+| Safety envelope | `safety-envelope/1.0.0` | **Implemented** | `dronez/safety/envelope.py` |
+| NFZ bulletin wire contract | `nfz-bulletin/1.0.0` | **Implemented** | `dronez/airspace/schema.py` |
+| MCP tool schema envelope | `mcp-tools/1.0.0` | **Implemented** | `mcp_server/schemas/base.py` |
+| `IncidentZone` | — | **Implemented** (closes `TM-01`, pending review) | `mcp_server/schemas/incident_zone.py` |
+| `deploy_recon_waypoint` | `deploy_recon_waypoint/1.0.0` | **Schema + policy implemented.** No dispatch path. | `mcp_server/schemas/tools.py`, `policy_engine/policies/` |
+| `check_airspace_clearance` | `check_airspace_clearance/1.0.0` | **Schema + decision logic implemented** | `mcp_server/schemas/tools.py`, `dronez/airspace/client.py` |
+| `confirm_flight_plan` | `confirm_flight_plan/1.0.0` | **Schema implemented.** Signature *verification* outstanding (`TM-14`). | `mcp_server/schemas/tools.py` |
+| `execute_safe_return` | `execute_safe_return/1.0.0` | **Schema implemented** | `mcp_server/schemas/tools.py` |
+| `stream_thermal_feed` | `stream_thermal_feed/1.0.0` | **Schema implemented** — pipeline is Milestone 2 | `mcp_server/schemas/tools.py` |
+| `get_fleet_status` | `get_fleet_status/1.0.0` | **Schema implemented** — scheduling is Milestone 3 | `mcp_server/schemas/tools.py` |
+| `request_emergency_stop` | `request_emergency_stop/1.0.0` | **Schema implemented** — broadcast channel is Milestone 4 | `mcp_server/schemas/tools.py` |
+| `get_airspace_status` | — | Specified only — read-only display, **never** a dispatch gate | — |
+
+**Ingress rule.** Requests are validated with `StrictModel.parse_json()` on the raw bytes,
+never `model_validate()` on a pre-parsed `dict`. Pydantic's strict mode is stricter in Python
+mode than in JSON mode — it rejects a list for a tuple and a string for an enum, which are
+JSON's only encodings for those — so validating a hand-built dict would reject legitimate
+traffic, and pre-parsing would mean a non-strict JSON parser ran before the strict one.
 
 **Versioning rule.** Schema versions are `<name>/<major>.<minor>.<patch>`. A **major** bump is
 required for any change that narrows what a consumer may send or widens what a producer may
@@ -380,8 +393,8 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 
 | ID | Item | Disposition | Owner / milestone |
 | --- | --- | --- | --- |
-| `TM-01` | `IncidentZone` model not finalized; the root authorization envelope is undefined | **Open — blocks Milestone-0 gate** | M0, criterion 4 |
-| `TM-02` | Policy-engine schema undefined; `src/dronez/policy/` empty | **Open — blocks Milestone-0 gate** | M0, criterion 6 |
+| `TM-01` | `IncidentZone` model not finalized; the root authorization envelope is undefined | **Implemented** — `mcp_server/schemas/incident_zone.py`, with the narrow-never-widen, always-time-boxed and command-room-only invariants enforced and tested. Awaiting review sign-off. | M0, criterion 4 |
+| `TM-02` | Policy-engine schema undefined | **Implemented** — Rego bundle in `policy_engine/policies/`. Awaiting review and `opa test` (`TM-13`). | M0, criterion 6 |
 | `TM-03` | Safety-envelope constants unreviewed; no named accountable owner | **Open — blocks Milestone-0 gate** | M0, criterion 2 |
 | `TM-04` | NFZ channel has no live sovereign endpoint; only the mock is exercised | **Open — blocks Milestone-0 gate** | M0, criterion 3 |
 | `TM-05` | `ed25519` bulletin signing allow-listed but **not implemented** | **Mitigated, fails closed** — an `ed25519` bulletin is rejected with an explicit error, never accepted unverified | M1 |
@@ -392,6 +405,10 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 | `TM-10` | Adversarial prompt-injection/jailbreak corpus does not exist | **Open** — release-blocking gate per Zero-Trust §11.1 | M5 |
 | `TM-11` | GACA registration and spectrum licensing not initiated | **Open — organizational, blocks Milestone-0 gate** | M0, criterion 5 |
 | `TM-12` | No HIL rig; the "server disconnected, fail-safe still works" test cannot yet run | **Open** — this is the single most important test in the programme | M1 |
+| `TM-13` | **The Rego bundle has never been executed.** `opa` could not be installed (blocked by egress policy), so the policies are verified only structurally by `tests/policy/test_policy_bundle.py` | **Open — blocks Milestone-0 criterion 6.** Mitigated in one direction: an unloadable policy leaves the path undefined, which `PolicyEngine` treats as a denial, so the failure mode is an outage rather than a bypass. Run `scripts/verify_policies.sh --require-opa`. | M1 |
+| `TM-14` | Command signature **verification** not implemented; `CommandSignature` defines the shape, nothing checks the cryptography | **Open** — schemas make an unsigned command unrepresentable, but a forged one would still parse | M1 |
+| `TM-15` | No nonce store; `CommandSignature.nonce` is carried but never consumed, so an exact replay inside the validity window is not yet rejected | **Open** | M1 |
+| `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Accepted, not load-bearing** — the deterministic policy gate is what must hold; see §3.2. Closes against the `TM-10` corpus. | M5 |
 
 ---
 
@@ -434,32 +451,56 @@ an **expiry date**. An exception past its expiry is a release-blocking finding.
 ### 10.1 Layout
 
 ```
-src/dronez/
-  safety/envelope.py       Safety-envelope constants + enforcement-locus registry (§4)
-  airspace/schema.py       NFZ bulletin wire contract — strict, stdlib-only, fuzzable
-  airspace/geometry.py     Conservative containment tests (PostGIS is authoritative from M1)
-  airspace/client.py       Fail-closed sync + clearance decision logic (§5.1)
-  airspace/mock_client.py  Development channel with injectable faults — NOT production
-  airspace/schemas/        Published JSON Schema contract
-  policy/                  Deterministic policy engine — intentionally empty at M0
+src/dronez/                 Milestone 0 — stdlib only, no dependencies
+  safety/envelope.py        Safety-envelope constants + enforcement-locus registry (§4)
+  airspace/schema.py        NFZ bulletin wire contract — strict, fuzzable
+  airspace/geometry.py      Conservative containment (PostGIS is authoritative from M1)
+  airspace/client.py        Fail-closed sync + clearance decision logic (§5.1)
+  airspace/mock_client.py   Development channel with injectable faults — NOT production
+src/mcp_server/             Milestone 1 — the MCP boundary
+  schemas/base.py           StrictModel: closed-world, immutable, strict; parse_json ingress
+  schemas/geo.py            GeoPolygon, bounded and closed-ring validated
+  schemas/identity.py       Roles, FIDO2-bound signatures, the precedence matrix
+  schemas/incident_zone.py  IncidentZone — the root authorization envelope (TM-01)
+  schemas/tools.py          All 7 tool contracts + the capability registry
+  guardrails/sanitizer.py   Isolated prompt screen, fail-closed (Llama Guard / Guardrails AI)
+  guardrails/rate_limiter.py  2 proposals/s and 2 commands/s, counted on attempts
+src/policy_engine/          Milestone 1 — the deterministic gate. No LLM, ever.
+  policies/*.rego           Containment, envelope bounds, clearance, precedence
+  policies/data/            Safety envelope as OPA data — GENERATED, do not hand-edit
+  client.py                 Fail-closed OPA client: no response, no answer, no allow
+  models.py                 Policy input projection and decision parsing
 tests/
-  unit/                    Envelope invariants and drift control
-  contract/                Wire-schema conformance and rejection cases
-  adversarial/             Fail-closed sweeps — every fault mode, no clearance
-docs/                      Threat model and ADRs
-migrations/                PostgreSQL + PostGIS schema
-scripts/                   Developer tooling
-infra/                     Terraform / Kubernetes (IaC only; no manual console changes)
+  unit/                     Envelope invariants, drift control, schema conformance
+  contract/                 Wire-schema rejection cases
+  adversarial/              Fail-closed sweeps — NFZ faults and guardrail bypasses
+  policy/                   Policy-engine failure modes and Rego bundle structure
+docs/                       Threat model and ADRs
+migrations/                 PostgreSQL + PostGIS schema
+scripts/                    Developer tooling
+infra/                      Terraform / Kubernetes (IaC only; no manual console changes)
 ```
 
-Runtime code is **stdlib-only** at Milestone 0 — the smallest possible supply-chain surface
-(Zero-Trust §6.2), and it lets the schema and clearance logic be fuzzed as pure functions.
+**Dependencies.** `dronez` stays stdlib-only so the envelope and clearance logic remain
+fuzzable as pure functions. Milestone 1 adds exactly one runtime dependency — `pydantic`,
+because Zero-Trust §3.1 mandates strict schema enforcement and hand-rolling it across seven
+tool contracts would trade a reviewed dependency for unreviewed validation code. The
+authorization path adds none: `policy_engine.client` speaks to OPA over `urllib`.
 
 ### 10.2 Commands
 
 ```bash
-python3 -m pytest tests -q            # full suite
-python3 scripts/envelope_report.py    # digest + table after changing a safety constant
+python3 -m pytest tests                  # full suite (244 tests)
+python3 -m ruff check src tests scripts  # lint
+python3 -m mypy src                      # strict type check
+python3 scripts/verify_milestone0.py     # gate invariants + criteria status
+
+# After changing ANY safety constant, both of these, in this order:
+python3 scripts/gen_policy_data.py       # regenerate the OPA data document
+python3 scripts/envelope_report.py       # digest + table to paste into §4.3
+
+# The Rego bundle has its own verification pass. CI must run it with --require-opa.
+scripts/verify_policies.sh               # opa check --strict + opa fmt + opa test
 ```
 
 ### 10.3 Release gates (Zero-Trust §11.1)

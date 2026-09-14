@@ -1,0 +1,46 @@
+{
+  "dronez": {
+    "safety_envelope": {
+      "_generated_by": "scripts/gen_policy_data.py -- do not edit by hand",
+      "constants": {
+        "agent_proposals_per_second": 2.0,
+        "altitude_max_agl_m": 120.0,
+        "altitude_min_agl_m": 15.0,
+        "battery_critical_pct": 10.0,
+        "battery_land_now_pct": 15.0,
+        "battery_range_reserve_factor": 1.3,
+        "battery_rtl_trigger_pct": 30.0,
+        "climb_rate_max_mps": 5.0,
+        "degraded_descent_rate_mps": 0.5,
+        "degraded_min_obstacle_clearance_m": 1.5,
+        "descent_rate_max_mps": 3.0,
+        "geofence_soft_buffer_m": 25.0,
+        "gnss_divergence_sustain_s": 2.0,
+        "gnss_ins_divergence_max_m": 12.0,
+        "gnss_max_hdop": 1.8,
+        "gnss_min_satellites": 8,
+        "ground_speed_max_mps": 15.0,
+        "hardware_commands_per_second": 2.0,
+        "incident_zone_max_duration_s": 21600.0,
+        "link_loss_grace_s": 5.0,
+        "mission_duration_max_s": 1800.0,
+        "mission_radius_max_m": 2000.0,
+        "nfz_clearance_validity_s": 120.0,
+        "nfz_max_staleness_s": 300.0,
+        "swarm_min_separation_m": 15.0
+      },
+      "digest": "8611e1395659fd6bb9ff023d5b9d08c28cd79d321e73007146a0b217b3393d99",
+      "prohibited_capabilities": [
+        "payload_release",
+        "weapon_arm",
+        "weapon_release",
+        "kinetic_effect",
+        "interdiction",
+        "target_engagement",
+        "autonomous_pursuit",
+        "standing_surveillance"
+      ],
+      "schema_version": "safety-envelope/1.0.0"
+    }
+  }
+}

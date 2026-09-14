@@ -9,11 +9,22 @@ description = "Tactical Drone Swarm & Recon MCP Server — reconnaissance-only, 
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
 
-# Milestone-0 runtime code is deliberately stdlib-only: the smallest possible
-# supply-chain surface (Zero-Trust Standard Sec.6.2), and it lets the schema and
-# clearance logic be fuzzed as pure functions. FastAPI, Pydantic and the OPA client
-# arrive with the MCP server at Milestone 1, pinned by a committed lockfile.
-dependencies = []
+# Milestone 1 adds exactly one runtime dependency. Every addition widens the
+# supply-chain surface (Zero-Trust Standard Sec.6.2), so each one is justified here:
+#
+#   pydantic  -- strict schema enforcement at the MCP boundary is mandated by
+#                Zero-Trust Sec.3.1, and hand-rolling it for seven tool contracts would
+#                trade a reviewed dependency for unreviewed validation code.
+#
+# `dronez.safety` and `dronez.airspace` remain stdlib-only so the safety envelope and
+# the clearance logic stay fuzzable as pure functions with no import surface.
+#
+# The policy engine deliberately adds nothing: policy_engine.client speaks to the OPA
+# sidecar over urllib rather than an HTTP library, keeping the authorization path's
+# dependency count at zero.
+dependencies = [
+    "pydantic>=2.7,<3",
+]
 
 [project.optional-dependencies]
 dev = [
@@ -27,6 +38,7 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "dronez.airspace" = ["schemas/*.json"]
+"policy_engine" = ["policies/*.rego", "policies/data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

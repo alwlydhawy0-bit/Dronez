@@ -10,6 +10,7 @@ criterion is reported, not failed, because closing one is a human owner's decisi
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +60,34 @@ def main() -> int:
         print(f"[{BAD}] envelope digest {digest} not recorded in CLAUDE.md")
         failures.append("envelope digest drift")
 
+    data_check = subprocess.run(
+        [sys.executable, "scripts/gen_policy_data.py", "--check"],
+        cwd=ROOT, capture_output=True, text=True,
+    )
+    if data_check.returncode == 0:
+        print(f"[{OK}] OPA policy data matches the safety envelope")
+    else:
+        print(f"[{BAD}] OPA policy data is stale: run scripts/gen_policy_data.py")
+        failures.append("policy data drift")
+
+    opa = shutil.which("opa")
+    if opa:
+        # S603: the argument vector is a repo-relative path plus a fixed flag --
+        # nothing here is caller-influenced.
+        policy_check = subprocess.run(  # noqa: S603
+            [str(ROOT / "scripts/verify_policies.sh"), "--require-opa"],
+            cwd=ROOT, capture_output=True, text=True,
+        )
+        if policy_check.returncode == 0:
+            print(f"[{OK}] Rego policy bundle verified (opa check + opa test)")
+        else:
+            print(f"[{BAD}] Rego policy bundle failed verification")
+            failures.append("rego bundle")
+    else:
+        # Not a hard failure locally, but it IS one in CI: an unverified authorization
+        # gate is TM-13, and the gate cannot close while it stands.
+        print(f"[{WARN}] Rego bundle UNVERIFIED -- opa not installed (TM-13)")
+
     result = subprocess.run(
         # -q already comes from the addopts in pyproject.toml; passing it again
         # would be -qq and suppress the summary line we want to report.
@@ -87,14 +116,14 @@ def main() -> int:
         (False,
          "3. Live sovereign NFZ endpoint connected (mock only -- TM-04)"),
         (False,
-         "4. IncidentZone model finalized (TM-01)"),
+         "4. IncidentZone model finalized -- IMPLEMENTED, awaiting review (TM-01)"),
         (False,
          "5. GACA registration / spectrum licensing initiated (TM-11)"),
         # Criteria 3-6 are tracked by hand: each closes on evidence a script cannot
         # see (a real endpoint synced, a reviewed data model, a filed licence
-        # application, an approved policy schema). Flip these as they close.
+        # application, a policy bundle verified by `opa test`). Flip these as they close.
         (False,
-         "6. Policy-engine schema defined (TM-02)"),
+         "6. Policy-engine schema defined -- IMPLEMENTED, unverified (TM-02, TM-13)"),
     ]
     open_count = 0
     for done, label in criteria:

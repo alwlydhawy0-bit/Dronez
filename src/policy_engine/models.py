@@ -38,6 +38,7 @@ class PolicyPath(StrEnum):
     """Rego decision paths this server queries. One per gated tool."""
 
     DEPLOY_RECON_WAYPOINT = "dronez/authz/deploy_recon_waypoint/decision"
+    OVERRIDE = "dronez/authz/override/decision"
 
 
 @dataclass(frozen=True, slots=True)
@@ -56,6 +57,108 @@ class DenyReason:
                 return cls(code=code[:64], detail=detail[:512])
         # An unparseable reason still denies; it just cannot be described precisely.
         return cls(code="unparseable_reason", detail=str(raw)[:512])
+
+
+@dataclass(frozen=True, slots=True)
+class OverrideDecision:
+    """Outcome of a precedence arbitration.
+
+    ``security_violation`` is a separate field from ``allowed`` on purpose: both a
+    Tier-2-over-Tier-1 attempt and a Tier-3 attempt are refusals, but only the second
+    is an attack indicator. Collapsing them would bury the signal that matters in
+    routine authorization noise.
+    """
+
+    allowed: bool
+    security_violation: bool
+    reasons: tuple[DenyReason, ...] = ()
+    violation: Mapping[str, Any] | None = None
+    policy_version: str = ""
+    engine_unavailable: bool = False
+
+    @classmethod
+    def deny(
+        cls, code: str, detail: str, *, engine_unavailable: bool = False
+    ) -> OverrideDecision:
+        return cls(
+            allowed=False,
+            security_violation=False,
+            reasons=(DenyReason(code=code, detail=detail),),
+            engine_unavailable=engine_unavailable,
+        )
+
+    @classmethod
+    def from_opa_result(cls, result: Any) -> OverrideDecision:
+        """Parse an override decision, failing closed on anything unexpected.
+
+        Note the asymmetry in how the two booleans are read. ``allow`` must be
+        literally ``True`` to permit anything. ``security_violation``, on a decision
+        that parsed, is treated as true unless it is literally ``False`` -- a missing
+        or mangled flag is not a licence to skip the alert, because a spurious alert
+        costs far less than a missed one.
+
+        A result that is not an object at all is different: that is a policy-engine
+        defect, reported as ``policy_malformed`` and *not* as an attack indicator.
+        Alerting on every malformed response would route Rego bugs to the security
+        on-call rota, which is where real violations would then be ignored.
+        """
+        if not isinstance(result, Mapping):
+            return cls.deny(
+                "policy_malformed",
+                f"override policy returned {type(result).__name__}, expected an object",
+            )
+
+        raw_deny = result.get("deny", [])
+        reasons: tuple[DenyReason, ...] = ()
+        if isinstance(raw_deny, Sequence) and not isinstance(raw_deny, (str, bytes)):
+            reasons = tuple(DenyReason.parse(item) for item in raw_deny[:64])
+
+        allowed = result.get("allow") is True
+        violation_flag = result.get("security_violation")
+        security_violation = violation_flag is not False
+
+        raw_violation = result.get("violation")
+        violation = raw_violation if isinstance(raw_violation, Mapping) else None
+
+        version = result.get("policy_version")
+        if allowed and security_violation:
+            # A decision that permits an action while flagging it as an attack is
+            # incoherent. Deny and surface it: this is a Rego defect, not a bad request.
+            return cls(
+                allowed=False,
+                security_violation=True,
+                reasons=(
+                    DenyReason(
+                        "policy_incoherent",
+                        "override policy allowed an action it also flagged as a security violation",
+                    ),
+                    *reasons,
+                ),
+                violation=violation,
+                policy_version=version if isinstance(version, str) else "",
+            )
+
+        return cls(
+            allowed=allowed,
+            security_violation=security_violation and not allowed,
+            reasons=reasons,
+            violation=violation,
+            policy_version=version if isinstance(version, str) else "",
+        )
+
+    @property
+    def codes(self) -> tuple[str, ...]:
+        return tuple(r.code for r in self.reasons)
+
+    def audit_record(self) -> dict[str, Any]:
+        return {
+            "allowed": self.allowed,
+            "security_violation": self.security_violation,
+            "policy_version": self.policy_version,
+            "engine_unavailable": self.engine_unavailable,
+            "deny": [{"code": r.code, "detail": r.detail} for r in self.reasons],
+            "violation": dict(self.violation) if self.violation else None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,3 +354,34 @@ def build_deploy_recon_waypoint_input(
         document["clearance"] = clearance_projection
 
     return document
+
+
+def build_override_input(
+    *,
+    actor_operator_id: str,
+    actor_role: str,
+    target_command_id: str,
+    target_issued_by_role: str,
+    target_issued_by_operator_id: str,
+    action: str,
+    now: datetime,
+) -> dict[str, Any]:
+    """Assemble the OPA input for a precedence arbitration.
+
+    Roles are **server-derived** on both sides: the actor's from the authenticated
+    session, the target's from the stored `Command` record. A request that could name
+    either would be naming its own authority.
+    """
+    return {
+        "now": now.isoformat(),
+        "action": action,
+        "principal": {
+            "operator_id": actor_operator_id,
+            "role": actor_role,
+        },
+        "target_command": {
+            "command_id": target_command_id,
+            "issued_by_role": target_issued_by_role,
+            "issued_by_operator_id": target_issued_by_operator_id,
+        },
+    }

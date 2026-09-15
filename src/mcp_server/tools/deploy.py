@@ -32,9 +32,11 @@ from collections.abc import Callable
 from typing import Any
 
 from dronez.airspace.client import ClearanceDecision
+from dronez.authz import Role
 from dronez.safety.envelope import ENVELOPE
 from mcp_server.audit import Outcome
 from mcp_server.feed import LiveAirspaceFeed, SyncStatus
+from mcp_server.precedence import PrecedenceArbiter
 from mcp_server.repositories import FleetProvider, MissionRegistry
 from mcp_server.schemas.base import StrictModel
 from mcp_server.schemas.tools import (
@@ -111,6 +113,7 @@ class DeployReconWaypointHandler:
         missions: MissionRegistry,
         fleet: FleetProvider,
         store: FlightPlanStore,
+        arbiter: PrecedenceArbiter | None = None,
         plan_id_factory: Callable[[], str] | None = None,
     ) -> None:
         self._feed = feed
@@ -118,11 +121,36 @@ class DeployReconWaypointHandler:
         self._missions = missions
         self._fleet = fleet
         self._store = store
+        self._arbiter = arbiter
         self._plan_id = plan_id_factory or (lambda: f"FP-{uuid.uuid4().hex[:16]}")
 
     def handle(
         self, request: DeployReconWaypointRequest, ctx: CallContext
     ) -> ToolOutcome:
+        # 0 -- precedence, before anything else.
+        #
+        # A Tier-3 agent naming a command to supersede is a security event, not a
+        # scheduling conflict (Master Plan Sec.5). It is checked first so the violation
+        # is recorded even when the request would have failed later for some mundane
+        # reason -- an attacker should not be able to hide a probe behind a bad polygon.
+        if request.supersedes_command_id and ctx.principal.identity.role is Role.AI_AGENT:
+            if self._arbiter is not None:
+                self._arbiter.report_supersession_attempt(
+                    principal=ctx.principal,
+                    superseded_command_id=request.supersedes_command_id,
+                    tool=self.name.value,
+                    payload=ctx.raw_payload,
+                )
+            return _reject(
+                RejectionCode.PRECEDENCE_VIOLATION,
+                "a Tier 3 agent proposal may not supersede a command; an agent holds no "
+                "override authority over any tier. This attempt has been recorded as a "
+                "security event.",
+                Outcome.SECURITY_VIOLATION,
+                offending=(request.supersedes_command_id,),
+                reason_codes=("agent_supersession_attempt",),
+            )
+
         # 1 -- resolve the authorization envelope, server-side.
         binding = self._missions.binding_for(request.mission_id)
         if binding is None:
@@ -190,6 +218,9 @@ class DeployReconWaypointHandler:
             cleared_polygon=request.polygon,
             cleared_altitude_min_m_agl=request.altitude_min_m_agl,
             cleared_altitude_max_m_agl=request.altitude_max_m_agl,
+            # Defence in depth: step 0 already refused a Tier-3 supersession, and the
+            # Rego refuses it independently. A regression in either still denies.
+            supersedes_command_id=request.supersedes_command_id,
         )
         decision = self._policy.evaluate(PolicyPath.DEPLOY_RECON_WAYPOINT, document)
 

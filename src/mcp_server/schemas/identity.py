@@ -16,11 +16,12 @@ carries the requirement, so it cannot be forgotten at a call site.
 from __future__ import annotations
 
 from datetime import datetime
-from enum import IntEnum, StrEnum
 from typing import Annotated, Self
 
 from pydantic import Field, model_validator
 
+from dronez.authz import Role, Tier, can_override
+from dronez.crypto import ALLOWED_SIGNATURE_ALGORITHMS, SignatureAlgorithm
 from mcp_server.schemas.base import StrictModel
 
 __all__ = [
@@ -35,79 +36,14 @@ __all__ = [
 ]
 
 
-class Tier(IntEnum):
-    """Precedence tier. **Lower value means higher authority.**
-
-    Comparing tiers with ``<`` therefore reads as "outranks", which is the whole
-    point of using an ``IntEnum`` here rather than free-form strings that invite
-    an accidental string comparison.
-    """
-
-    COMMAND_ROOM = 1
-    FIELD_LEADER = 2
-    AI_AGENT = 3
+# Tier, Role and can_override live in `dronez.authz.precedence` so the MCP server, the
+# policy engine and the airframe-side bridge share one matrix. They are re-exported
+# here because they are part of this module's public surface.
 
 
-class Role(StrEnum):
-    """Issuing role. Maps 1:1 onto a :class:`Tier`."""
-
-    COMMAND_ROOM = "command_room"
-    FIELD_LEADER = "field_leader"
-    AI_AGENT = "ai_agent"
-
-    @property
-    def tier(self) -> Tier:
-        return _ROLE_TIER[self]
-
-
-_ROLE_TIER: dict[Role, Tier] = {
-    Role.COMMAND_ROOM: Tier.COMMAND_ROOM,
-    Role.FIELD_LEADER: Tier.FIELD_LEADER,
-    Role.AI_AGENT: Tier.AI_AGENT,
-}
-
-
-def can_override(actor: Role, target: Role) -> bool:
-    """Whether ``actor`` may cancel or override a command issued by ``target``.
-
-    The Precedence Matrix from Master Plan §5, as executable code:
-
-    =================  ===========================================
-    Tier               May override
-    =================  ===========================================
-    1 Command Room     any Tier 2 or Tier 3 command
-    2 Field Leader     Tier 3 only; never the Command Room
-    3 AI Agent         **nothing**, regardless of stated urgency
-    =================  ===========================================
-
-    Two properties are load-bearing and are asserted by tests:
-
-    * The AI agent can never override anything, **including another agent
-      proposal**. An agent that could cancel its own earlier proposal could
-      launder a rejected plan into an accepted one.
-    * Authority is strictly by tier, never by recency. A later command does not
-      win by virtue of arriving second.
-    """
-    if actor is Role.AI_AGENT:
-        return False
-    return actor.tier < target.tier
-
-
-class SignatureAlgorithm(StrEnum):
-    """Allow-listed command-signing algorithms.
-
-    This enum *selects* a verifier the server already trusts; it never supplies
-    one. There is deliberately no ``none`` member -- the classic algorithm-confusion
-    payload cannot even be spelled (Zero-Trust §1.1).
-    """
-
-    ES256 = "ES256"
-    ES384 = "ES384"
-    RS256 = "RS256"
-    PS256 = "PS256"
-
-
-ALLOWED_SIGNATURE_ALGORITHMS: frozenset[str] = frozenset(a.value for a in SignatureAlgorithm)
+# SignatureAlgorithm and its allow-list live in `dronez.crypto` so the MCP server and
+# the airframe-side MAVLink bridge share one definition. They are re-exported here
+# because they are part of this module's public surface.
 
 _ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
 

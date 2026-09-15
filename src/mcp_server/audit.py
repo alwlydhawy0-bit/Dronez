@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import threading
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -66,6 +66,9 @@ class Outcome(StrEnum):
     REJECTED_POLICY = "rejected_policy"
     REJECTED_CLEARANCE = "rejected_clearance"
     REJECTED_DISPATCH_GATE = "rejected_dispatch_gate"
+    #: A rejection that is also an attack indicator in its own right -- not a caller
+    #: getting something wrong, but a caller reaching for authority it does not hold.
+    SECURITY_VIOLATION = "security_violation"
     ERROR = "error"
 
     @property
@@ -82,6 +85,7 @@ class Outcome(StrEnum):
             Outcome.REJECTED_SCOPE,
             Outcome.REJECTED_SIGNATURE,
             Outcome.REJECTED_POLICY,
+            Outcome.SECURITY_VIOLATION,
         }
 
 
@@ -136,6 +140,71 @@ class CommandRecord:
             "reason_codes": list(self.reason_codes),
             "detail": self.detail[:512],
             "decision": redact(self.decision),
+        }
+
+
+class ViolationSeverity(StrEnum):
+    """Incident severity, per the response matrix in Zero-Trust §8.2.
+
+    P1 pages someone now. P2 is reviewed within the working day. The distinction is
+    operational, not cosmetic: routing everything to P1 trains responders to ignore it.
+    """
+
+    P1 = "P1"
+    P2 = "P2"
+    P3 = "P3"
+
+
+class ViolationKind(StrEnum):
+    """What was attempted. Each is a distinct detection rule, not a generic 'denied'."""
+
+    #: Master Plan §5: an agent attempting to override or cancel a human command is
+    #: "treated as a security event, not a benign conflict".
+    TIER3_SUPERSESSION = "tier3_supersession_attempt"
+    #: A signature valid in itself but presented by, or bound to, the wrong principal.
+    SIGNATURE_IMPERSONATION = "signature_impersonation"
+    #: An agent session reaching for a tool outside its capability scope.
+    TOOL_SCOPE_ESCALATION = "tool_scope_escalation"
+    #: Content that tried to rewrite the agent's instructions or widen its scope.
+    PROMPT_INJECTION = "prompt_injection"
+    #: A reused nonce or a replayed authorization.
+    REPLAY = "replay_attempt"
+    #: A request naming a capability this platform does not and will not have.
+    PROHIBITED_CAPABILITY = "prohibited_capability"
+
+
+@dataclass(frozen=True, slots=True)
+class SecurityViolation:
+    """A rejection that is also an attack indicator.
+
+    Kept structurally distinct from an ordinary denial so a SIEM rule can alert on
+    *these* without drowning in routine authorization failures. A field leader reaching
+    one tier too high is a denial; an AI agent reaching for override authority is one
+    of these.
+    """
+
+    kind: ViolationKind
+    severity: ViolationSeverity
+    actor_operator_id: str | None
+    actor_role: str | None
+    session_id: str | None
+    detail: str
+    #: The command, plan or tool the actor reached for.
+    target: str | None = None
+    context: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_alert(self) -> dict[str, Any]:
+        """Projection for the alerting pipeline. Redacted like any other log line."""
+        return {
+            "alert": "security_violation",
+            "kind": self.kind.value,
+            "severity": self.severity.value,
+            "actor_operator_id": self.actor_operator_id,
+            "actor_role": self.actor_role,
+            "session_id": self.session_id,
+            "target": self.target,
+            "detail": self.detail[:512],
+            "context": redact(dict(self.context)),
         }
 
 
@@ -209,9 +278,52 @@ class AuditTrail:
         sink: AuditSink,
         *,
         clock: Callable[[], datetime] | None = None,
+        alert_sink: Callable[[SecurityViolation], None] | None = None,
     ) -> None:
         self._sink = sink
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._alert_sink = alert_sink
+
+    def record_violation(
+        self,
+        violation: SecurityViolation,
+        *,
+        tool: str,
+        payload: bytes = b"",
+    ) -> CommandRecord:
+        """Record a security violation.
+
+        Writes a ``Command`` record like any other attempt -- Master Plan §5 requires
+        every rejected proposal to be logged -- and additionally fans the violation out
+        to the alert sink, because *this* class of rejection is the one worth waking
+        someone for.
+
+        The two are deliberately one call: a violation recorded in the audit trail but
+        never alerted, or alerted but never recorded, is the failure mode this method
+        exists to make impossible.
+        """
+        record = self.record(
+            tool=tool,
+            outcome=Outcome.SECURITY_VIOLATION,
+            payload=payload,
+            operator_id=violation.actor_operator_id,
+            role=violation.actor_role,
+            session_id=violation.session_id,
+            decision=violation.to_alert(),
+            reason_codes=(violation.kind.value,),
+            detail=violation.detail,
+        )
+        if self._alert_sink is not None:
+            try:
+                self._alert_sink(violation)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException:  # noqa: S110 - an alerting defect must not change the verdict
+                # Same reasoning as the audit sink: this IS the reporting path, so
+                # reporting its failure through itself would recurse. Alert-pipeline
+                # health is monitored where the sink is constructed.
+                pass
+        return record
 
     def record(
         self,

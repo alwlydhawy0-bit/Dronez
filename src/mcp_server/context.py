@@ -17,11 +17,12 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from mcp_server.audit import AuditSink, AuditTrail, InMemoryAuditSink
+from mcp_server.audit import AuditSink, AuditTrail, InMemoryAuditSink, SecurityViolation
 from mcp_server.dispatch import GatedDispatcher, HardwareDispatcher
 from mcp_server.feed import LiveAirspaceFeed
 from mcp_server.guardrails.rate_limiter import AgentProposalLimiter, HardwareCommandLimiter
 from mcp_server.guardrails.sanitizer import PromptSanitizer
+from mcp_server.precedence import PrecedenceArbiter
 from mcp_server.repositories import FleetProvider, MissionRegistry
 from mcp_server.schemas.tools import ToolName
 from mcp_server.security import PrincipalResolver
@@ -61,6 +62,10 @@ class ServerContext:
     nonces: NonceStore = field(default_factory=NonceStore)
     dispatcher: HardwareDispatcher = field(default_factory=GatedDispatcher)
     audit_sink: AuditSink = field(default_factory=InMemoryAuditSink)
+    #: Fan-out for security violations -- the subset of rejections worth paging on.
+    #: Defaults to None, which still records them in the audit trail; production wires
+    #: this to the SIEM (Zero-Trust §8.2).
+    alert_sink: Callable[[SecurityViolation], None] | None = None
 
     proposal_limiter: AgentProposalLimiter = field(default_factory=AgentProposalLimiter)
     command_limiter: HardwareCommandLimiter = field(default_factory=HardwareCommandLimiter)
@@ -70,11 +75,15 @@ class ServerContext:
     # Populated by __post_init__.
     audit: AuditTrail = field(init=False)
     verifier: SignatureVerifier = field(init=False)
+    arbiter: PrecedenceArbiter = field(init=False)
     handlers: Mapping[ToolName, ToolHandler] = field(init=False)
 
     def __post_init__(self) -> None:
-        self.audit = AuditTrail(self.audit_sink, clock=self.clock)
+        self.audit = AuditTrail(
+            self.audit_sink, clock=self.clock, alert_sink=self.alert_sink
+        )
         self.verifier = SignatureVerifier(self.key_registry, self.nonces, clock=self.clock)
+        self.arbiter = PrecedenceArbiter(self.policy, self.audit, clock=self.clock)
         self.handlers = build_handlers(self)
 
     def now(self) -> datetime:
@@ -98,6 +107,7 @@ def build_handlers(ctx: ServerContext) -> dict[ToolName, ToolHandler]:
             missions=ctx.missions,
             fleet=ctx.fleet,
             store=ctx.store,
+            arbiter=ctx.arbiter,
         ),
         ToolName.CONFIRM_FLIGHT_PLAN: ConfirmFlightPlanHandler(
             store=ctx.store,

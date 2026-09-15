@@ -182,6 +182,14 @@ class DeployReconWaypointRequest(StrictModel):
     #: Optional preferred airframe. A preference only -- the scheduler may override it,
     #: and naming a drone never bypasses the availability check.
     preferred_drone_id: DroneId | None = None
+    #: Identifier of a command this proposal replaces, when the caller holds override
+    #: authority over it.
+    #:
+    #: Declared deliberately rather than left as an undeclared field. If a Tier-3 agent
+    #: could not *express* a supersession, its attempt would be rejected as a generic
+    #: schema error and the signal would be lost. Making it expressible is what lets
+    #: the precedence gate classify it as a security violation (Master Plan §5).
+    supersedes_command_id: Annotated[str | None, Field(max_length=64)] = None
 
     @model_validator(mode="after")
     def _altitude_band_is_ordered(self) -> Self:

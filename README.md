@@ -61,6 +61,17 @@ refusal is the boundary of this milestone, and a test asserts it.
   digest *and* the decision, bound to the operator's FIDO2 credential, with single-use nonces
   and single-use plans. Closes `TM-14` and `TM-15`.
 
+**Milestone 1 — command signing and precedence**
+
+- **Non-repudiation command signing** (`ros2_bridge/mavlink_signer.py`) — short-lived
+  ECDSA/RSA operator tokens bound to a FIDO2 credential, plus MAVLink2 message signing with a
+  monotonic replay guard. The two are bound: a frame cannot be signed without a verified
+  authorization naming that exact command. No transport — the module opens no socket.
+- **Role Precedence Matrix** — Tier 1 > Tier 2 > Tier 3, defined once and mirrored in Rego with
+  a drift test comparing the two tables. A Tier-3 attempt to supersede any command is rejected
+  *and* raised as a P1 security violation; a Tier-2-over-Tier-1 attempt is an ordinary refusal,
+  because classifying both the same way buries the signal that matters.
+
 **Milestone 1 — validation and authorization**
 
 - **Strict MCP tool schemas** — all 7 tools, closed-world and immutable, with bounds derived
@@ -89,6 +100,7 @@ refusal is the boundary of this milestone, and a test asserts it.
 | [`docs/02-security-threat-model.md`](docs/02-security-threat-model.md) | STRIDE model for the full chain |
 | [`docs/03-nfz-gaca-sync-channel.md`](docs/03-nfz-gaca-sync-channel.md) | NFZ channel design and how to connect the live endpoint |
 | [`docs/04-authorization-chain.md`](docs/04-authorization-chain.md) | The authorization chain, layer by layer, and where dispatch stops |
+| [`docs/05-command-signing-and-precedence.md`](docs/05-command-signing-and-precedence.md) | Non-repudiation signing, MAVLink2 message signing, and the Role Precedence Matrix |
 
 ## Development
 
@@ -97,7 +109,7 @@ lets the schema and clearance logic be fuzzed as pure functions.
 
 ```bash
 python3 -m pip install -e '.[dev]'
-python3 -m pytest tests               # 330 tests
+python3 -m pytest tests               # 413 tests
 python3 scripts/verify_milestone0.py  # gate invariants + criteria status
 scripts/verify_policies.sh            # opa check --strict + opa fmt + opa test
 ```

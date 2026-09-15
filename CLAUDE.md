@@ -344,21 +344,58 @@ The contract it implements:
   outcome*, including agent-proposed-but-rejected attempts, because a pattern of rejected
   proposals is itself a security signal.
 
-### 5.3 Command signing & the precedence matrix (from Milestone 1, not retrofitted)
+### 5.3 Command signing & the precedence matrix
 
-Every field command carries a short-lived ECDSA/RSA non-repudiation token cryptographically
-bound to the issuing operator's FIDO2/WebAuthn hardware key. **An unsigned or improperly-bound
-command is rejected before it reaches the policy engine, not after.**
+**Two signatures, two different jobs.** Conflating them loses one of them:
+
+| | Operator command token | MAVLink2 message signing |
+| --- | --- | --- |
+| Proves | *a named human authorized this* | *these bytes are intact and came from the bridge* |
+| Primitive | ECDSA/RSA, asymmetric | SHA-256 with a shared per-link secret |
+| Bound to | a FIDO2/WebAuthn authenticator | a link, a system, a component |
+| Non-repudiation | **yes** | no — both ends hold the key |
+
+A shared secret cannot establish *who* acted, so the MAVLink layer alone would leave the
+system unable to answer "who authorized this flight?" after an incident. That question is why
+the operator token exists. `ros2_bridge/mavlink_signer.py` binds them: **a MAVLink frame
+cannot be signed without a verified operator authorization naming that exact command.**
+`MavlinkSigner.sign` accepts only an `AuthorizedFieldCommand`, which exists only as the return
+value of a successful verification — so the ordering is unskippable by construction, not by
+discipline.
+
+**The Role Precedence Matrix** — defined once in `dronez/authz/precedence.py`, mirrored in
+`policy_engine/policies/override.rego`, and the two are machine-checked against each other by
+`tests/policy/test_precedence_matrix.py`:
 
 | Tier | Role | May override / cancel |
 | --- | --- | --- |
 | 1 (highest) | Command Room | Any Tier 2 or Tier 3 command |
 | 2 | Tactical Field Leader | Tier 3 only — cannot override Command Room |
-| 3 (lowest) | AI Agent proposal | **Nothing.** Cannot override or cancel any human-issued command, regardless of its own stated confidence or claimed urgency |
+| 3 (lowest) | AI Agent proposal | **Nothing.** Not even another agent proposal — an agent able to cancel its own earlier proposal could launder a rejected plan into an accepted one by superseding the rejection |
 
-A Tier 3 proposal that references or attempts to supersede a Tier 1/2 command identifier is
-rejected outright and logged with a policy-violation flag. **This is a security event, not a
-benign conflict.**
+Authority is strictly by tier, **never by recency**, and never between peers: a later command
+does not win by arriving second.
+
+**The asymmetry that matters.** Two refusals come out of this matrix and they are not the
+same event:
+
+- **Tier 2 reaching for Tier 1** is an ordinary authorization failure. A field leader
+  legitimately holds override authority over *something*; reaching one tier too high is a
+  mistake a person makes.
+- **Tier 3 reaching for anything** is a **security violation** (Master Plan §5): *"rejected
+  outright and logged as a `Command` record with a policy-violation flag — this is treated as
+  a security event, not a benign conflict."* An agent holds no override authority at all, so
+  an attempt is either compromise or malfunction.
+
+Classifying both identically would bury the signal that matters in routine noise, so
+`Outcome.SECURITY_VIOLATION` and `SecurityViolation` (P1) are structurally distinct from an
+ordinary denial. `AuditTrail.record_violation` writes the `Command` record **and** fans out to
+the alert sink in one call: a violation recorded but never alerted, or alerted but never
+recorded, is the failure mode that API exists to prevent.
+
+`supersedes_command_id` is a **declared** field on `DeployReconWaypointRequest`. An attempt
+that could not be expressed would be rejected as a generic schema error and the signal lost;
+making it expressible is what lets the gate classify it.
 
 ### 5.4 Drone mission state machine
 
@@ -418,6 +455,8 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 | `TM-14` | Command signature **verification** not implemented | **Closed** — `mcp_server/signing.py` verifies ES256/ES384/RS256/PS256 over canonical bytes that include the plan digest and the decision, bound to the operator's registered FIDO2 credential. `cryptography` is optional; absent, those algorithms are rejected rather than skipped. | M1 |
 | `TM-15` | No nonce store, so an exact replay inside the validity window is not rejected | **Closed** — `NonceStore`, TTL-bounded and consumed only *after* the signature verifies, so a bad signature cannot burn a legitimate nonce. | M1 |
 | `TM-17` | The identity provider is a static token resolver; real OIDC + JWKS verification and device-posture attestation are not implemented | **Open** — `PrincipalResolver` is the seam. The principal is already server-derived, so role and zone scoping cannot be set by a request. | M1 |
+| `TM-19` | MAVLink per-link signing secrets have no provisioning, rotation or revocation path; `MavlinkSigningKey` takes bytes from wherever the caller got them | **Open** — the primitive is correct, the key lifecycle is not built. Blocks any real link. | M1 |
+| `TM-20` | The precedence arbiter classifies a Tier-3 attempt from the matrix rather than from the policy response, so the security flag survives a policy-engine outage — but the two computations are only cross-checked by test, not at runtime | **Accepted** — deriving it independently is deliberate; a signal that disappears when the engine is down is not a signal. | — |
 | `TM-18` | The flight-plan staging store and nonce store are in-process, so single-use consumption does not hold across instances | **Open** — a multi-instance deployment could confirm one plan once per instance. Blocks the HA/active-active work. | M3 |
 | `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Accepted, not load-bearing** — the deterministic policy gate is what must hold; see §3.2. Closes against the `TM-10` corpus. | M5 |
 
@@ -462,8 +501,11 @@ an **expiry date**. An exception past its expiry is a release-blocking finding.
 ### 10.1 Layout
 
 ```
-src/dronez/                 Milestone 0 — stdlib only, no dependencies
+src/dronez/                 Stdlib only (cryptography optional), no framework deps
   safety/envelope.py        Safety-envelope constants + enforcement-locus registry (§4)
+  authz/precedence.py       THE Role Precedence Matrix. Mirrored in Rego, drift-tested.
+  crypto/                   Signature algorithms, key registry, nonce store — shared by
+                            the server and the airframe bridge so neither reimplements it
   airspace/schema.py        NFZ bulletin wire contract — strict, fuzzable
   airspace/geometry.py      Conservative containment (PostGIS is authoritative from M1)
   airspace/client.py        Fail-closed sync + clearance decision logic (§5.1)
@@ -487,8 +529,11 @@ src/mcp_server/             Milestone 1 — the MCP boundary
   schemas/tools.py          All 7 tool contracts + the capability registry
   guardrails/sanitizer.py   Isolated prompt screen, fail-closed (Llama Guard / Guardrails AI)
   guardrails/rate_limiter.py  2 proposals/s and 2 commands/s, counted on attempts
+src/ros2_bridge/            Airframe-side. NO TRANSPORT — no socket, no publisher.
+  mavlink_signer.py         Operator command tokens + MAVLink2 message signing, bound
+                            together so a frame cannot be signed unauthorized
 src/policy_engine/          Milestone 1 — the deterministic gate. No LLM, ever.
-  policies/*.rego           Containment, envelope bounds, clearance, precedence
+  policies/*.rego           Containment, envelope bounds, clearance, precedence, override
   policies/data/            Safety envelope as OPA data — GENERATED, do not hand-edit
   client.py                 Fail-closed OPA client: no response, no answer, no allow
   models.py                 Policy input projection and decision parsing
@@ -498,6 +543,7 @@ tests/
   adversarial/              Fail-closed sweeps — NFZ faults and guardrail bypasses
   policy/                   Policy-engine failure modes and Rego bundle structure
   server/                   End-to-end over the real HTTP surface, incl. TLS handshakes
+  bridge/                   MAVLink signing and the operator-token binding
 docs/                       Threat model and ADRs
 migrations/                 PostgreSQL + PostGIS schema
 scripts/                    Developer tooling
@@ -515,7 +561,7 @@ rejected rather than passing unverified. The authorization path itself adds noth
 ### 10.2 Commands
 
 ```bash
-python3 -m pytest tests                  # full suite (330 tests)
+python3 -m pytest tests                  # full suite (413 tests)
 python3 -m ruff check src tests scripts  # lint
 python3 -m mypy src                      # strict type check
 python3 scripts/verify_milestone0.py     # gate invariants + criteria status

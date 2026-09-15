@@ -260,10 +260,21 @@ class DetectionMode(StrEnum):
 
 
 class StreamThermalFeedRequest(StrictModel):
+    """Request a live thermal/optical feed.
+
+    ``sdp_offer`` is screened at the signaling layer before any session is created.
+    Master Plan §5: *"the stream is rejected at the signaling layer if a client cannot
+    negotiate"* DTLS/SRTP -- so the offer has to be part of the request rather than
+    exchanged afterwards, or there would be nothing to reject before allocation.
+    """
+
     mission_id: MissionId
     drone_id: DroneId
     stream_quality: StreamQuality
     detection_mode: DetectionMode
+    #: WebRTC offer, screened by `mcp_server.media.SdpGuard`. Bounded here as well as in
+    #: the guard so an oversized offer is refused by the schema before it is parsed.
+    sdp_offer: Annotated[str, Field(min_length=16, max_length=64 * 1024)]
 
 
 class StreamThermalFeedResponse(StrictModel):

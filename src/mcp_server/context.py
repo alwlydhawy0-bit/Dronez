@@ -32,6 +32,7 @@ from mcp_server.tools.base import ToolHandler
 from mcp_server.tools.clearance import CheckAirspaceClearanceHandler
 from mcp_server.tools.confirm import ConfirmFlightPlanHandler
 from mcp_server.tools.deploy import DeployReconWaypointHandler
+from mcp_server.tools.stream import StreamSessionRegistry, StreamThermalFeedHandler
 from policy_engine import PolicyEngine
 
 __all__ = ["FREE_TEXT_FIELDS", "ServerContext", "build_handlers"]
@@ -58,6 +59,10 @@ class ServerContext:
     resolver: PrincipalResolver
 
     store: FlightPlanStore = field(default_factory=FlightPlanStore)
+    #: Optional override. Left unset, __post_init__ builds one sharing this context's
+    #: clock -- a registry with its own clock would expire sessions on a different
+    #: timeline from everything else in the request path.
+    stream_session_registry: StreamSessionRegistry | None = None
     key_registry: KeyRegistry = field(default_factory=KeyRegistry)
     nonces: NonceStore = field(default_factory=NonceStore)
     dispatcher: HardwareDispatcher = field(default_factory=GatedDispatcher)
@@ -76,11 +81,15 @@ class ServerContext:
     audit: AuditTrail = field(init=False)
     verifier: SignatureVerifier = field(init=False)
     arbiter: PrecedenceArbiter = field(init=False)
+    stream_sessions: StreamSessionRegistry = field(init=False)
     handlers: Mapping[ToolName, ToolHandler] = field(init=False)
 
     def __post_init__(self) -> None:
         self.audit = AuditTrail(
             self.audit_sink, clock=self.clock, alert_sink=self.alert_sink
+        )
+        self.stream_sessions = self.stream_session_registry or StreamSessionRegistry(
+            clock=self.clock
         )
         self.verifier = SignatureVerifier(self.key_registry, self.nonces, clock=self.clock)
         self.arbiter = PrecedenceArbiter(self.policy, self.audit, clock=self.clock)
@@ -108,6 +117,10 @@ def build_handlers(ctx: ServerContext) -> dict[ToolName, ToolHandler]:
             fleet=ctx.fleet,
             store=ctx.store,
             arbiter=ctx.arbiter,
+        ),
+        ToolName.STREAM_THERMAL_FEED: StreamThermalFeedHandler(
+            missions=ctx.missions,
+            sessions=ctx.stream_sessions,
         ),
         ToolName.CONFIRM_FLIGHT_PLAN: ConfirmFlightPlanHandler(
             store=ctx.store,

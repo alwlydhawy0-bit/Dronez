@@ -61,6 +61,28 @@ refusal is the boundary of this milestone, and a test asserts it.
   digest *and* the decision, bound to the operator's FIDO2 credential, with single-use nonces
   and single-use plans. Closes `TM-14` and `TM-15`.
 
+**Milestone 2 — the evidentiary pipeline**
+
+- **Edge frame hashing** (`edge_node/frame_hasher.py`) — every frame hashed on the Jetson
+  *before* transmission and chained to its predecessor, so deletion and reordering are
+  detectable and not just modification. Chain heads are sealed periodically by the secure
+  element: one asymmetric operation per segment rather than per frame, because signing at
+  video rate is not possible.
+- **WORM chain of custody** (`dronez/evidence/`) — `ChainOfCustodyRecord` with a store that
+  has **no delete method and no update method**. Not a refusal — an absence.
+- **DTLS/SRTP enforcement** (`mcp_server/media/webrtc.py`) — SDES, SHA-1 fingerprints,
+  plaintext profiles and missing ICE are all rejected at the signaling layer, before a
+  session is allocated. The DTLS *version* floor is enforced in the media engine, because
+  SDP cannot carry it — the split is documented rather than faked.
+- **Graceful degradation** (`edge_node/degradation.py`) — video sheds before detection,
+  always. `DETECTION_ONLY` is the floor and still tells the command room what is in the
+  building. Archival is unconditional: evidence is preserved whether or not anyone is
+  watching.
+
+> **Known gap (`TM-21`):** the privacy **redaction** pipeline is not built. Master Plan §2
+> requires blur/redaction before footage leaves the tactical boundary, and §6 requires
+> compliance sign-off on it first. Footage must not leave that boundary until it exists.
+
 **Milestone 1 — command signing and precedence**
 
 - **Non-repudiation command signing** (`ros2_bridge/mavlink_signer.py`) — short-lived
@@ -101,6 +123,7 @@ refusal is the boundary of this milestone, and a test asserts it.
 | [`docs/03-nfz-gaca-sync-channel.md`](docs/03-nfz-gaca-sync-channel.md) | NFZ channel design and how to connect the live endpoint |
 | [`docs/04-authorization-chain.md`](docs/04-authorization-chain.md) | The authorization chain, layer by layer, and where dispatch stops |
 | [`docs/05-command-signing-and-precedence.md`](docs/05-command-signing-and-precedence.md) | Non-repudiation signing, MAVLink2 message signing, and the Role Precedence Matrix |
+| [`docs/06-evidentiary-pipeline.md`](docs/06-evidentiary-pipeline.md) | Edge frame hashing, the WORM chain of custody, DTLS/SRTP, and degradation |
 
 ## Development
 
@@ -109,7 +132,7 @@ lets the schema and clearance logic be fuzzed as pure functions.
 
 ```bash
 python3 -m pip install -e '.[dev]'
-python3 -m pytest tests               # 413 tests
+python3 -m pytest tests               # 490 tests
 python3 scripts/verify_milestone0.py  # gate invariants + criteria status
 scripts/verify_policies.sh            # opa check --strict + opa fmt + opa test
 ```

@@ -224,11 +224,14 @@ See the deep dives in §5.2 and §5.3.
 
 | ID | S | Threat | Control | Residual | M |
 | --- | --- | --- | --- | --- | --- |
-| T-43 | **T** | Footage altered after capture to change what an incident showed | Cryptographic hash computed **per frame on the edge hardware before transmission** — not on arrival. Evidentiary integrity therefore does not depend on trusting the network path or the receiving system | Low | M2 |
-| T-44 | **T** | Administrator deletes inconvenient records | **No identity in the system, including administrators, holds delete or modify permission on committed records.** WORM with object lock | Low | M2 |
+| T-43 | **T** | Footage altered after capture to change what an incident showed | Cryptographic hash computed **per frame on the edge hardware before transmission** — not on arrival. Evidentiary integrity therefore does not depend on trusting the network path or the receiving system. **Implemented** (`edge_node/frame_hasher.py`) | Low | M2 ✅ |
+| T-43b | **T** | Footage **deleted or reordered** rather than altered — every remaining per-frame hash stays valid | Records are **chained**: each commits to its predecessor, so a gap breaks the linkage. Truncation of the tail needs the sealed head as an external anchor (`TM-25`) | Low-Med | M2 ✅ |
+| T-44 | **T** | Administrator deletes inconvenient records | **No identity in the system, including administrators, holds delete or modify permission on committed records.** `WormSink` declares no delete or update method at all. Real resistance to a privileged attacker needs S3 Object Lock in compliance mode (`TM-22`) | Low-Med | M2 |
 | T-45 | **R** | Chain of custody cannot be established in legal proceedings | `ChainOfCustodyRecord`: hash + timestamp + collecting system for every artifact, recorded in the immutable store at collection time | Low | M2 |
 | T-46 | **I** | Bystanders incidentally captured; footage distributed beyond the tactical boundary | Redaction/blur pipeline runs before footage leaves the tactical/legal-hold boundary; documented retention and data-classification policy; compliance sign-off is a named stakeholder | **Medium** — process control as much as a technical one | M2 |
-| T-47 | **I** | Thermal feed intercepted in transit | **Mandatory DTLS 1.3 / SRTP** on the WebRTC media pipeline; the stream is **rejected at the signaling layer** if a client cannot negotiate it | Low | M2 |
+| T-47 | **I** | Thermal feed intercepted in transit | **Mandatory DTLS 1.3 / SRTP.** SDES, SHA-1 fingerprints, plaintext profiles and missing ICE are rejected at the signaling layer (`SdpGuard`). The DTLS version floor is enforced in the media engine, which SDP cannot express — no engine consumes it yet (`TM-23`) | Med until `TM-23` | M2 |
+| T-47b | **T** | Ciphertext bits flipped in a non-AEAD SRTP profile, corrupting a thermal frame without the receiver noticing | AEAD profiles only (AES-GCM); `DtlsSrtpPolicy` refuses to be constructed with a non-AEAD profile | Low | M2 ✅ |
+| T-47c | **D** | Link degraded or jammed to suppress a detection alert | Detection events are **never sheddable**: every tier including the floor carries them, and archival to WORM is unconditional at capture | Low | M2 ✅ |
 | T-48 | **D** | Ransomware encrypts the evidentiary store | 3-2-1 backups with one offline/immutable/air-gapped copy; object-lock immutability ≥ maximum plausible intrusion dwell time; restore tested on a cadence | Low-Med | M5 |
 
 ### 4.7 Cross-cutting

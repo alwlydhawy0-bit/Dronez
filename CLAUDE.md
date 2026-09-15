@@ -284,7 +284,7 @@ A kinetic bound with a `server`-only locus is a design defect, and
 | `check_airspace_clearance` | `check_airspace_clearance/1.0.0` | **SERVED.** Refreshes the live feed before deciding; stale ⇒ denial. | `mcp_server/tools/clearance.py` |
 | `confirm_flight_plan` | `confirm_flight_plan/1.0.0` | **SERVED.** ES256 signature verification and single-use nonces (closes `TM-14`, `TM-15`). | `mcp_server/tools/confirm.py` |
 | `execute_safe_return` | `execute_safe_return/1.0.0` | Schema only — not served | `mcp_server/schemas/tools.py` |
-| `stream_thermal_feed` | `stream_thermal_feed/1.0.0` | Schema only — pipeline is Milestone 2 | `mcp_server/schemas/tools.py` |
+| `stream_thermal_feed` | `stream_thermal_feed/1.0.0` | **SERVED.** SDP screened at signaling; session time-boxed to the zone window. | `mcp_server/tools/stream.py` |
 | `get_fleet_status` | `get_fleet_status/1.0.0` | Schema only — scheduling is Milestone 3 | `mcp_server/schemas/tools.py` |
 | `request_emergency_stop` | `request_emergency_stop/1.0.0` | Schema only — broadcast channel is Milestone 4 | `mcp_server/schemas/tools.py` |
 
@@ -456,6 +456,11 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 | `TM-15` | No nonce store, so an exact replay inside the validity window is not rejected | **Closed** — `NonceStore`, TTL-bounded and consumed only *after* the signature verifies, so a bad signature cannot burn a legitimate nonce. | M1 |
 | `TM-17` | The identity provider is a static token resolver; real OIDC + JWKS verification and device-posture attestation are not implemented | **Open** — `PrincipalResolver` is the seam. The principal is already server-derived, so role and zone scoping cannot be set by a request. | M1 |
 | `TM-19` | MAVLink per-link signing secrets have no provisioning, rotation or revocation path; `MavlinkSigningKey` takes bytes from wherever the caller got them | **Open** — the primitive is correct, the key lifecycle is not built. Blocks any real link. | M1 |
+| `TM-21` | **Privacy redaction pipeline is not built.** Master Plan §2 requires blur/redaction before footage leaves the tactical boundary; §6 requires compliance sign-off on it first | **Open — blocks the Milestone-2 gate.** Footage must not leave the tactical boundary until this exists. | M2 |
+| `TM-22` | The WORM store is in-process (`InMemoryWormStore`): no durability, no object lock, no resistance to a privileged attacker | **Open** — the interface contract holds; S3 Object Lock in compliance mode is the real control | M2 |
+| `TM-23` | `DtlsSrtpPolicy` is configuration that no media engine consumes yet, so the DTLS 1.3 floor is declared but unenforced on a real media path | **Open** — signaling-layer checks are live; the version floor is not | M2 |
+| `TM-24` | `SecureElementSigner` has no TPM-backed implementation, so segment seals are unsigned in practice | **Open** — `seal_segment` raises rather than pretending, so the failure is loud | M2 |
+| `TM-25` | Chain truncation is undetectable from the records alone; it requires comparing against a sealed head held elsewhere | **Accepted, documented** — this is what segment seals are for; auditors must compare against the seal, not merely verify the records in hand | M2 |
 | `TM-20` | The precedence arbiter classifies a Tier-3 attempt from the matrix rather than from the policy response, so the security flag survives a policy-engine outage — but the two computations are only cross-checked by test, not at runtime | **Accepted** — deriving it independently is deliberate; a signal that disappears when the engine is down is not a signal. | — |
 | `TM-18` | The flight-plan staging store and nonce store are in-process, so single-use consumption does not hold across instances | **Open** — a multi-instance deployment could confirm one plan once per instance. Blocks the HA/active-active work. | M3 |
 | `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Accepted, not load-bearing** — the deterministic policy gate is what must hold; see §3.2. Closes against the `TM-10` corpus. | M5 |
@@ -503,6 +508,7 @@ an **expiry date**. An exception past its expiry is a release-blocking finding.
 ```
 src/dronez/                 Stdlib only (cryptography optional), no framework deps
   safety/envelope.py        Safety-envelope constants + enforcement-locus registry (§4)
+  evidence/                 ChainOfCustodyRecord + WORM sink. The sink has NO delete.
   authz/precedence.py       THE Role Precedence Matrix. Mirrored in Rego, drift-tested.
   crypto/                   Signature algorithms, key registry, nonce store — shared by
                             the server and the airframe bridge so neither reimplements it
@@ -532,6 +538,11 @@ src/mcp_server/             Milestone 1 — the MCP boundary
 src/ros2_bridge/            Airframe-side. NO TRANSPORT — no socket, no publisher.
   mavlink_signer.py         Operator command tokens + MAVLink2 message signing, bound
                             together so a frame cannot be signed unauthorized
+src/edge_node/              Jetson-class edge compute. NO TRANSPORT.
+  frame_hasher.py           Per-frame hashing BEFORE transmission; chained; sealed
+  detection.py              DetectionEvent, bound to the frame it came from
+  degradation.py            Tier ladder. Detection is never sheddable.
+  pipeline.py               capture -> hash -> archive (always) -> transmit (maybe)
 src/policy_engine/          Milestone 1 — the deterministic gate. No LLM, ever.
   policies/*.rego           Containment, envelope bounds, clearance, precedence, override
   policies/data/            Safety envelope as OPA data — GENERATED, do not hand-edit
@@ -561,7 +572,7 @@ rejected rather than passing unverified. The authorization path itself adds noth
 ### 10.2 Commands
 
 ```bash
-python3 -m pytest tests                  # full suite (413 tests)
+python3 -m pytest tests                  # full suite (490 tests)
 python3 -m ruff check src tests scripts  # lint
 python3 -m mypy src                      # strict type check
 python3 scripts/verify_milestone0.py     # gate invariants + criteria status

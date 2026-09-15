@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Final
 
 from dronez.crypto import (
     CRYPTOGRAPHY_AVAILABLE,
@@ -48,6 +49,8 @@ from mcp_server.schemas.identity import (
 
 __all__ = [
     "CRYPTOGRAPHY_AVAILABLE",
+    "EMERGENCY_STOP_DECISION",
+    "NO_PLAN_DIGEST",
     "KeyRegistry",
     "NonceStore",
     "SignatureFailure",
@@ -56,6 +59,14 @@ __all__ = [
     "VerificationKey",
     "canonical_authorization_bytes",
 ]
+
+
+#: Domain-separation tag for an emergency-stop authorization. Distinct from every
+#: ``ConfirmDecision`` value, so the two signature families cannot be interchanged.
+EMERGENCY_STOP_DECISION: Final[str] = "emergency_stop"
+
+#: Sentinel occupying the plan-digest slot when there is no plan to digest.
+NO_PLAN_DIGEST: Final[str] = "0" * 64
 
 
 def canonical_authorization_bytes(
@@ -201,6 +212,24 @@ class SignatureVerifier:
             )
 
         return SignatureVerdict(valid=True)
+
+    def verify_emergency_stop(
+        self, envelope: SignedCommandEnvelope, *, incident_zone_id: str
+    ) -> SignatureVerdict:
+        """Verify an authorization for a zone-scoped emergency stop.
+
+        A stop has no flight plan, so the plan-digest slot carries a fixed sentinel and
+        the zone id takes the plan-id slot. Both are still inside the signed bytes, and
+        ``decision`` differs from every :class:`ConfirmDecision` value -- so a captured
+        flight-plan approval can never be presented as a stop, and a stop authorization
+        for zone A can never be presented against zone B.
+        """
+        return self.verify_confirmation(
+            envelope,
+            flight_plan_id=incident_zone_id,
+            flight_plan_digest=NO_PLAN_DIGEST,
+            decision=EMERGENCY_STOP_DECISION,
+        )
 
     @property
     def available_algorithms(self) -> frozenset[SignatureAlgorithm]:

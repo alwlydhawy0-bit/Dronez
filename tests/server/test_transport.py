@@ -129,8 +129,14 @@ def test_unknown_method_is_method_not_found(harness: Harness) -> None:
 
 
 def test_specified_but_unimplemented_tool_is_method_not_found(harness: Harness) -> None:
-    """A tool with a contract but no handler is not advertised as available."""
-    body = harness.rpc("request_emergency_stop", {}).json()
+    """A tool with a contract but no handler is not advertised as available.
+
+    ``execute_safe_return`` is the remaining case: an RTL is a command to an airborne
+    airframe, so every path to it runs through the dispatch seam CLAUDE.md §2.1 holds
+    closed. The server reports it as absent rather than registering a placeholder that
+    would advertise a capability it does not have.
+    """
+    body = harness.rpc("execute_safe_return", {}).json()
     assert body["error"]["code"] == -32601
     assert "not implemented" in body["error"]["message"]
 

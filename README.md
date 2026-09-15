@@ -109,6 +109,43 @@ refusal is the boundary of this milestone, and a test asserts it.
   incident zone, altitude/velocity bounding, and sovereign clearance validation bound to the
   requested volume. The client denies on every failure: no response, no answer, no allow.
 
+**Milestones 3 & 4 — fleet management and the emergency safety paths**
+
+- **`get_fleet_status`** — read-only, zone-scoped, and never a dispatch gate. Availability is
+  *computed* from state, battery, grounding and telemetry age, not echoed from a field: a
+  record older than 30 s is not authoritative, because its battery and position are guesses.
+  An agent sees availability; queue depth and preemption candidates stay with the command room.
+- **Priority-queue arbitration** (`fleet_manager/scheduler.py`) — ordered by incident priority,
+  then role tier, then arrival, then a monotonic admission counter so two requests in the same
+  clock tick still order deterministically. It distinguishes *"wait"* from *"call someone
+  else"*: queueing a request no airframe could ever serve tells an operator to wait for
+  something that will never happen, during an incident. **Preemption is advisory** — the
+  scheduler assembles the context and recalls nothing, because choosing between two live
+  incidents is a human judgement.
+- **Telemetry is untrusted input** — a reported transition the airframe cannot physically make
+  is rejected and counted, and the *stale* record is kept. That record then fails the freshness
+  check and stops dispatch on its own; believing the impossible state would not.
+- **`request_emergency_stop`** — signed, zone-bound, single-use, and broadcast over a channel
+  asserted independent of the dispatcher at composition time. Deliberately **not** policy-gated:
+  fail-closed means denying *authority*, not denying *safety*, and an unreachable policy engine
+  must not be able to prevent a stop. Delivery is reported as `delivered` / `undelivered` /
+  `complete` rather than a boolean, because an operator whose stop reached three of four
+  airframes needs to know which one it missed.
+- **`DEGRADED_VISUAL_INERTIAL_LANDING`** — specified in full
+  ([`docs/07-degraded-landing-firmware-spec.md`](docs/07-degraded-landing-firmware-spec.md)),
+  including 18 HIL acceptance cases. What this repository *implements* is the negative
+  capability: `GROUND_COMMANDABLE` in `dronez/safety/states.py` is an allow-list in which no
+  pair touches a fail-safe state in either direction, asserted across the full state
+  cross-product. The server has no vocabulary to command entry into a fail-safe, or exit from
+  one. Every state remains observable — blinding the command room during the event they most
+  need to understand would be its own safety failure.
+
+> **Known gaps (`TM-26`, `TM-27`):** the emergency-stop channel's independence is checked
+> structurally (same object, shared transport) and the default is an in-memory development
+> channel — real RF independence is a deployment property to verify on the rig. And all 18
+> DVIL HIL cases are unexecuted, for want of that rig (`TM-12`); the descent-rate and
+> obstacle-clearance constants remain engineering defaults until they run.
+
 > **Known gap (`TM-13`):** the Rego has never been executed — the OPA binary is blocked by
 > egress policy in the build environment. It is verified structurally by
 > `tests/policy/test_policy_bundle.py` only. Run `scripts/verify_policies.sh --require-opa`
@@ -124,6 +161,7 @@ refusal is the boundary of this milestone, and a test asserts it.
 | [`docs/04-authorization-chain.md`](docs/04-authorization-chain.md) | The authorization chain, layer by layer, and where dispatch stops |
 | [`docs/05-command-signing-and-precedence.md`](docs/05-command-signing-and-precedence.md) | Non-repudiation signing, MAVLink2 message signing, and the Role Precedence Matrix |
 | [`docs/06-evidentiary-pipeline.md`](docs/06-evidentiary-pipeline.md) | Edge frame hashing, the WORM chain of custody, DTLS/SRTP, and degradation |
+| [`docs/07-degraded-landing-firmware-spec.md`](docs/07-degraded-landing-firmware-spec.md) | The firmware-resident dual-failure landing state, and the HIL criteria that accept an implementation of it |
 
 ## Development
 
@@ -132,7 +170,7 @@ lets the schema and clearance logic be fuzzed as pure functions.
 
 ```bash
 python3 -m pip install -e '.[dev]'
-python3 -m pytest tests               # 490 tests
+python3 -m pytest tests               # 880 tests
 python3 scripts/verify_milestone0.py  # gate invariants + criteria status
 scripts/verify_policies.sh            # opa check --strict + opa fmt + opa test
 ```

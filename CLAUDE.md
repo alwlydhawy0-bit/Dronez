@@ -283,10 +283,10 @@ A kinetic bound with a `server`-only locus is a design defect, and
 | `deploy_recon_waypoint` | `deploy_recon_waypoint/1.0.0` | **SERVED.** Obtains its own clearance, then the policy gate, then stages. Never dispatches. | `mcp_server/tools/deploy.py` |
 | `check_airspace_clearance` | `check_airspace_clearance/1.0.0` | **SERVED.** Refreshes the live feed before deciding; stale ⇒ denial. | `mcp_server/tools/clearance.py` |
 | `confirm_flight_plan` | `confirm_flight_plan/1.0.0` | **SERVED.** ES256 signature verification and single-use nonces (closes `TM-14`, `TM-15`). | `mcp_server/tools/confirm.py` |
-| `execute_safe_return` | `execute_safe_return/1.0.0` | Schema only — not served | `mcp_server/schemas/tools.py` |
+| `execute_safe_return` | `execute_safe_return/1.0.0` | Schema only — **not served.** An RTL is a command to an airborne airframe, so every path to it runs through the dispatch seam §2.1 holds closed. | `mcp_server/schemas/tools.py` |
 | `stream_thermal_feed` | `stream_thermal_feed/1.0.0` | **SERVED.** SDP screened at signaling; session time-boxed to the zone window. | `mcp_server/tools/stream.py` |
-| `get_fleet_status` | `get_fleet_status/1.0.0` | Schema only — scheduling is Milestone 3 | `mcp_server/schemas/tools.py` |
-| `request_emergency_stop` | `request_emergency_stop/1.0.0` | Schema only — broadcast channel is Milestone 4 | `mcp_server/schemas/tools.py` |
+| `get_fleet_status` | `get_fleet_status/1.0.0` | **SERVED.** Read-only, zone-scoped; the scheduler view is withheld from agents. Never a dispatch gate. | `mcp_server/tools/fleet.py` |
+| `request_emergency_stop` | `request_emergency_stop/1.0.0` | **SERVED.** Signed, zone-scoped, broadcast over a channel asserted independent of the dispatcher. **Not policy-gated** — see §5.6. | `mcp_server/tools/emergency.py` |
 
 | `get_airspace_status` | — | Specified only — read-only display, **never** a dispatch gate | — |
 
@@ -417,6 +417,81 @@ It is **not** a `trigger_reason` of `execute_safe_return` — it *preempts* it, 
 RTL still assumes the aircraft can navigate. The two are mutually exclusive at any instant, and
 the firmware selects between them based on which sensors are actually available.
 
+Full specification and the HIL acceptance criteria that gate a vendor's firmware:
+[`docs/07-degraded-landing-firmware-spec.md`](docs/07-degraded-landing-firmware-spec.md).
+
+**What this repository contributes is a negative capability.**
+`src/dronez/safety/states.py` holds `GROUND_COMMANDABLE`, an allow-list of 14 transitions
+in which **no pair touches a fail-safe state in either direction**. The server cannot command
+entry into `FAILSAFE` or `DEGRADED_VISUAL_INERTIAL_LANDING`, and cannot command exit from
+either — not "asks politely and is refused", but *has no vocabulary to express it*.
+`tests/unit/test_states.py` asserts this across the full state cross-product rather than by
+example, because a hole in an allow-list is exactly what an example-based test misses.
+
+Every state is nevertheless **observable**: the command room must be able to see that an
+airframe has entered degraded landing, or the operators are blind during the event they most
+need to understand. Observable is not requestable, and conflating the two is how a safety
+state becomes an attack surface — a state you can *ask* for is a state an adversary can
+*induce*.
+
+> **Do not add a ground path into or out of a fail-safe state.** If a future requirement
+> appears to need one, it is a requirement to change the firmware's triggers, not to give the
+> server an override. Zero-Trust §4.1 forbids the override in as many words.
+
+### 5.5 Fleet scheduling — a resource decision, not a safety one
+
+`src/fleet_manager/` answers *who waits*. It is deliberately outside the policy gate, because
+a scheduling bug delays a mission rather than flying an unsafe one — every assignment it makes
+is still re-validated by `deploy_recon_waypoint`, which takes its own fleet snapshot at
+decision time rather than trusting one a caller fetched earlier.
+
+- **Availability is computed, never asserted.** A drone is dispatchable because its state,
+  battery, grounding and telemetry age all say so. `STALE_TELEMETRY_S` (30 s) is part of that:
+  believing a stale record means dispatching to an airframe whose battery, position and state
+  are all guesses.
+- **Arbitration order is `(incident priority, role tier, arrival, admission counter)`.** The
+  counter is there so two requests in the same clock tick still order deterministically —
+  a non-reproducible queue cannot tell an operator their position.
+- **"Unserviceable" and "queued" are different answers.** Queueing a request no airframe could
+  ever serve tells an operator to wait for something that will never happen, during an incident.
+- **Preemption is advisory and only advisory.** The scheduler surfaces which recall would
+  unblock a higher-priority request, with the context assembled, and recalls nothing. Choosing
+  between two live incidents is a human judgement.
+- **Telemetry is untrusted input.** A reported transition the airframe cannot physically make
+  is rejected and counted, and the *stale* record is kept — which then fails the freshness
+  check and stops dispatch on its own. Believing the impossible state would not.
+
+### 5.6 `request_emergency_stop` — why a safety action is not policy-gated
+
+Every other tool consults the deterministic gate. This one does not, and that is a decision
+rather than an omission.
+
+Fail-closed means denying **authority**, not denying **safety**. A stop makes the fleet
+strictly less capable, so the conservative answer when a check cannot complete is to let it
+through. Requiring an OPA round-trip would mean an unreachable policy engine could *prevent*
+a stop — and the policy engine sits on the primary command path, which is plausibly the thing
+that failed.
+
+What a stop still requires, and why:
+
+| Control | Why it cannot be dropped |
+| --- | --- |
+| A verified FIDO2-bound signature | An unauthenticated stop endpoint is a fleet-wide denial-of-service primitive |
+| A single-use nonce | A captured stop that can be resent is the same DoS, delayed |
+| Domain separation (`decision = "emergency_stop"` inside the signed bytes) | Otherwise a captured flight-plan approval replays as a stop |
+| Zone binding, checked **after** the signature | Checking it first turns the endpoint into a zone enumerator for an unsigned caller |
+| Human tier only | A Tier-3 agent that could stop the fleet could ground it |
+
+`assert_channel_independence` refuses at composition time a configuration where the stop
+channel is the dispatcher, or shares its transport — so a server wired that way does not
+start. It is a structural check, not a proof: genuine RF independence is a deployment
+property verified physically, and is a Milestone-4 HIL gate (`TM-26`).
+
+Delivery is reported honestly: `delivered`, `undelivered` and `complete` are separate, because
+an operator whose stop reached three of four airframes needs the list of which one it missed,
+not a boolean. A channel that raises produces everything-undelivered rather than an exception,
+since an exception carries no such list.
+
 ---
 
 ## 6. Trust boundaries
@@ -462,6 +537,9 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 | `TM-24` | `SecureElementSigner` has no TPM-backed implementation, so segment seals are unsigned in practice | **Open** — `seal_segment` raises rather than pretending, so the failure is loud | M2 |
 | `TM-25` | Chain truncation is undetectable from the records alone; it requires comparing against a sealed head held elsewhere | **Accepted, documented** — this is what segment seals are for; auditors must compare against the seal, not merely verify the records in hand | M2 |
 | `TM-20` | The precedence arbiter classifies a Tier-3 attempt from the matrix rather than from the policy response, so the security flag survives a policy-engine outage — but the two computations are only cross-checked by test, not at runtime | **Accepted** — deriving it independently is deliberate; a signal that disappears when the engine is down is not a signal. | — |
+| `TM-26` | **The emergency-stop channel is not actually independent.** `assert_channel_independence` catches the same-object and shared-transport cases structurally; no RF-independent transport exists, and the default is an in-memory development channel | **Open — blocks the Milestone-4 gate.** Physical independence is a deployment property that must be verified on the HIL rig, not claimed in code. The default channel names itself distinctly in the audit log so a deployment running on it is obvious rather than silent. | M4 |
+| `TM-27` | **The DVIL specification is unvalidated against hardware.** `degraded_descent_rate_mps` and `degraded_min_obstacle_clearance_m` are engineering defaults, not values measured against a specific ultrasonic/LiDAR array's range, sample rate and minimum sensing distance — and no airframe is selected | **Open.** [`docs/07-degraded-landing-firmware-spec.md`](docs/07-degraded-landing-firmware-spec.md) §8 lists the 18 HIL cases that close it; all 18 are unexecuted for want of a rig (`TM-12`). The server-side invariant — that no ground path reaches the state — is implemented and tested. | M4 |
+| `TM-28` | The fleet registry and scheduler are in-process, so two server instances could reserve the same airframe for two missions | **Open** — mitigated in one direction: `deploy_recon_waypoint` re-derives fleet facts at decision time and the policy gate re-checks them, so a double reservation produces a denial rather than two dispatches. Blocks the HA/active-active work alongside `TM-18`. | M3 |
 | `TM-18` | The flight-plan staging store and nonce store are in-process, so single-use consumption does not hold across instances | **Open** — a multi-instance deployment could confirm one plan once per instance. Blocks the HA/active-active work. | M3 |
 | `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Accepted, not load-bearing** — the deterministic policy gate is what must hold; see §3.2. Closes against the `TM-10` corpus. | M5 |
 
@@ -508,6 +586,8 @@ an **expiry date**. An exception past its expiry is a release-blocking finding.
 ```
 src/dronez/                 Stdlib only (cryptography optional), no framework deps
   safety/envelope.py        Safety-envelope constants + enforcement-locus registry (§4)
+  safety/states.py          Mission state machine. GROUND_COMMANDABLE is an allow-list
+                            that touches no fail-safe state, in either direction.
   evidence/                 ChainOfCustodyRecord + WORM sink. The sink has NO delete.
   authz/precedence.py       THE Role Precedence Matrix. Mirrored in Rego, drift-tested.
   crypto/                   Signature algorithms, key registry, nonce store — shared by
@@ -527,7 +607,9 @@ src/mcp_server/             Milestone 1 — the MCP boundary
   feed.py                   Live NFZ refresh: background loop + on-demand before a decision
   context.py                Composition root; fail-closed defaults
   repositories.py           Mission/zone/fleet lookups — server-derived facts only
-  tools/                    The three served handlers
+  emergency.py              Emergency stop: independent channel, never policy-gated
+  media/webrtc.py           SDP screen + DTLS/SRTP policy (M2)
+  tools/                    The six served handlers
   schemas/base.py           StrictModel: closed-world, immutable, strict; parse_json ingress
   schemas/geo.py            GeoPolygon, bounded and closed-ring validated
   schemas/identity.py       Roles, FIDO2-bound signatures, the precedence matrix
@@ -535,6 +617,10 @@ src/mcp_server/             Milestone 1 — the MCP boundary
   schemas/tools.py          All 7 tool contracts + the capability registry
   guardrails/sanitizer.py   Isolated prompt screen, fail-closed (Llama Guard / Guardrails AI)
   guardrails/rate_limiter.py  2 proposals/s and 2 commands/s, counted on attempts
+src/fleet_manager/          Milestone 3 — who is flying, and who gets a drone next.
+  registry.py               Computed availability; an impossible reported state is
+                            rejected, not believed
+  scheduler.py              Priority-queue arbitration. Preemption is ADVISORY only.
 src/ros2_bridge/            Airframe-side. NO TRANSPORT — no socket, no publisher.
   mavlink_signer.py         Operator command tokens + MAVLink2 message signing, bound
                             together so a frame cannot be signed unauthorized
@@ -555,6 +641,8 @@ tests/
   policy/                   Policy-engine failure modes and Rego bundle structure
   server/                   End-to-end over the real HTTP surface, incl. TLS handshakes
   bridge/                   MAVLink signing and the operator-token binding
+  fleet/                    Registry availability rules and scheduler arbitration
+  edge/, evidence/          Frame hashing, chain of custody, WORM, degradation
 docs/                       Threat model and ADRs
 migrations/                 PostgreSQL + PostGIS schema
 scripts/                    Developer tooling
@@ -572,7 +660,7 @@ rejected rather than passing unverified. The authorization path itself adds noth
 ### 10.2 Commands
 
 ```bash
-python3 -m pytest tests                  # full suite (490 tests)
+python3 -m pytest tests                  # full suite (880 tests)
 python3 -m ruff check src tests scripts  # lint
 python3 -m mypy src                      # strict type check
 python3 scripts/verify_milestone0.py     # gate invariants + criteria status

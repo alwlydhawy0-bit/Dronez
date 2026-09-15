@@ -25,6 +25,8 @@ from fastapi.testclient import TestClient
 
 from dronez.airspace.client import AirspaceCache, AirspaceClearanceService
 from dronez.airspace.mock_client import MockNfzSyncChannel, dev_key_registry
+from dronez.safety.states import DroneState as FleetDroneState
+from fleet_manager import DroneRecord, FleetRegistry
 from mcp_server.app import RPC_PATH, create_app
 from mcp_server.context import ServerContext
 from mcp_server.feed import LiveAirspaceFeed
@@ -49,6 +51,8 @@ from mcp_server.schemas.incident_zone import (
 from mcp_server.schemas.tools import DroneState, DroneStatus
 from mcp_server.security import AuthenticatedPrincipal, StaticTokenResolver
 from mcp_server.signing import (
+    EMERGENCY_STOP_DECISION,
+    NO_PLAN_DIGEST,
     KeyRegistry,
     NonceStore,
     VerificationKey,
@@ -105,7 +109,11 @@ class Harness:
     channel: MockNfzSyncChannel
     transport: StaticPolicyTransport
     fleet: InMemoryFleetProvider
+    drones: FleetRegistry
     signing_key: ec.EllipticCurvePrivateKey
+    #: The field leader's own key. Master Plan §5 lets a field leader stop the zone
+    #: without command-room mediation, so the harness must be able to sign as one.
+    fl_signing_key: ec.EllipticCurvePrivateKey
 
     def rpc(
         self,
@@ -143,7 +151,11 @@ class Harness:
         credential: str = CR_CRED,
         nonce: str = "nonce-0000000000000001",
         mission_id: str = MISSION_ID,
+        role: str = "command_room",
+        key_id: str = "key-cr-1",
+        key: ec.EllipticCurvePrivateKey | None = None,
     ) -> dict[str, Any]:
+        signer = key or self.signing_key
         signed_at = self.clock()
         expires_at = signed_at + timedelta(seconds=120)
         blob = canonical_authorization_bytes(
@@ -156,17 +168,17 @@ class Harness:
             signed_at=signed_at,
             expires_at=expires_at,
         )
-        sig = self.signing_key.sign(blob, ec.ECDSA(hashes.SHA256()))
+        sig = signer.sign(blob, ec.ECDSA(hashes.SHA256()))
         return {
             "issuer": {
                 "operator_id": operator_id,
-                "role": "command_room",
+                "role": role,
                 "fido2_credential_id": credential,
                 "authorized_zone_ids": [ZONE_ID],
             },
             "signature": {
                 "algorithm": "ES256",
-                "key_id": "key-cr-1",
+                "key_id": key_id,
                 "fido2_credential_id": credential,
                 "value": sig.hex(),
                 "signed_at": signed_at.isoformat(),
@@ -175,6 +187,30 @@ class Harness:
             },
             "mission_id": mission_id,
         }
+
+    def sign_stop(
+        self,
+        *,
+        incident_zone_id: str = ZONE_ID,
+        operator_id: str = FL_ID,
+        credential: str = FL_CRED,
+        role: str = "field_leader",
+        key_id: str = "key-fl-1",
+        key: ec.EllipticCurvePrivateKey | None = None,
+        nonce: str = "nonce-stop-000000000001",
+    ) -> dict[str, Any]:
+        """Sign an emergency-stop authorization over the stop's own domain."""
+        return self.sign_confirmation(
+            flight_plan_id=incident_zone_id,
+            digest=NO_PLAN_DIGEST,
+            decision=EMERGENCY_STOP_DECISION,
+            operator_id=operator_id,
+            credential=credential,
+            nonce=nonce,
+            role=role,
+            key_id=key_id,
+            key=key or self.fl_signing_key,
+        )
 
 
 def _allow_transport() -> StaticPolicyTransport:
@@ -220,6 +256,7 @@ def harness() -> Iterator[Harness]:
     )
 
     signing_key = ec.generate_private_key(ec.SECP256R1())
+    fl_signing_key = ec.generate_private_key(ec.SECP256R1())
     key_registry = KeyRegistry((
         VerificationKey(
             key_id="key-cr-1",
@@ -227,6 +264,13 @@ def harness() -> Iterator[Harness]:
             material=signing_key.public_key(),
             operator_id=CR_ID,
             fido2_credential_id=CR_CRED,
+        ),
+        VerificationKey(
+            key_id="key-fl-1",
+            algorithm=SignatureAlgorithm.ES256,
+            material=fl_signing_key.public_key(),
+            operator_id=FL_ID,
+            fido2_credential_id=FL_CRED,
         ),
     ))
 
@@ -238,6 +282,33 @@ def harness() -> Iterator[Harness]:
             ),
         ),
         endurance_s_by_drone={"D-1": 2400.0},
+    )
+    # The fleet registry is the richer view: it carries state, endurance, telemetry age
+    # and home zone, which the flat DroneStatus DTO deliberately does not expose.
+    drones = FleetRegistry(
+        (
+            DroneRecord(
+                drone_id="D-1", airframe_type="quad-micro",
+                state=FleetDroneState.IDLE, battery_pct=95.0, endurance_s=2400.0,
+                last_seen_utc=T0, home_zone_id=ZONE_ID,
+            ),
+            DroneRecord(
+                drone_id="D-2", airframe_type="quad-micro",
+                state=FleetDroneState.ON_STATION, battery_pct=64.0, endurance_s=1500.0,
+                last_seen_utc=T0, home_zone_id=ZONE_ID, current_mission_id=MISSION_ID,
+            ),
+            DroneRecord(
+                drone_id="D-3", airframe_type="quad-micro",
+                state=FleetDroneState.IDLE, battery_pct=88.0, endurance_s=2200.0,
+                last_seen_utc=T0, home_zone_id=ZONE_ID, maintenance_grounded=True,
+            ),
+            DroneRecord(
+                drone_id="D-9", airframe_type="quad-micro",
+                state=FleetDroneState.ON_STATION, battery_pct=70.0, endurance_s=1800.0,
+                last_seen_utc=T0, home_zone_id="IZ-OTHER",
+            ),
+        ),
+        clock=clock,
     )
     transport = _allow_transport()
 
@@ -253,6 +324,7 @@ def harness() -> Iterator[Harness]:
             AGENT_TOKEN: AuthenticatedPrincipal(agent, "sess-agent"),
         }),
         store=FlightPlanStore(clock=clock),
+        fleet_registry=drones,
         key_registry=key_registry,
         nonces=NonceStore(clock=clock),
         proposal_limiter=AgentProposalLimiter(clock=lambda: clock().timestamp()),
@@ -264,7 +336,10 @@ def harness() -> Iterator[Harness]:
         require_tls=False, start_feed_refresh=False,
     )
     with TestClient(app) as client:
-        yield Harness(client, ctx, clock, channel, transport, fleet, signing_key)
+        yield Harness(
+            client, ctx, clock, channel, transport, fleet, drones,
+            signing_key, fl_signing_key,
+        )
 
 
 def deploy_params(

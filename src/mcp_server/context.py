@@ -17,8 +17,15 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from fleet_manager import FleetRegistry, FleetScheduler
 from mcp_server.audit import AuditSink, AuditTrail, InMemoryAuditSink, SecurityViolation
 from mcp_server.dispatch import GatedDispatcher, HardwareDispatcher
+from mcp_server.emergency import (
+    EmergencyBroadcastChannel,
+    EmergencyStopService,
+    InMemoryBroadcastChannel,
+    assert_channel_independence,
+)
 from mcp_server.feed import LiveAirspaceFeed
 from mcp_server.guardrails.rate_limiter import AgentProposalLimiter, HardwareCommandLimiter
 from mcp_server.guardrails.sanitizer import PromptSanitizer
@@ -32,6 +39,8 @@ from mcp_server.tools.base import ToolHandler
 from mcp_server.tools.clearance import CheckAirspaceClearanceHandler
 from mcp_server.tools.confirm import ConfirmFlightPlanHandler
 from mcp_server.tools.deploy import DeployReconWaypointHandler
+from mcp_server.tools.emergency import RequestEmergencyStopHandler
+from mcp_server.tools.fleet import GetFleetStatusHandler
 from mcp_server.tools.stream import StreamSessionRegistry, StreamThermalFeedHandler
 from policy_engine import PolicyEngine
 
@@ -59,10 +68,17 @@ class ServerContext:
     resolver: PrincipalResolver
 
     store: FlightPlanStore = field(default_factory=FlightPlanStore)
-    #: Optional override. Left unset, __post_init__ builds one sharing this context's
-    #: clock -- a registry with its own clock would expire sessions on a different
-    #: timeline from everything else in the request path.
+    #: Optional overrides. Left unset, __post_init__ builds each one sharing this
+    #: context's clock -- a component with its own clock would expire sessions, stale
+    #: telemetry and queue estimates on a different timeline from the request path.
     stream_session_registry: StreamSessionRegistry | None = None
+    fleet_registry: FleetRegistry | None = None
+    fleet_scheduler: FleetScheduler | None = None
+    #: The emergency-stop transport. Defaults to the in-memory development channel,
+    #: which names itself distinctly in the audit log so a deployment accidentally
+    #: running on it is obvious rather than silent. Production supplies the dedicated
+    #: RF channel, and __post_init__ refuses a channel that shares the dispatcher.
+    stop_channel: EmergencyBroadcastChannel | None = None
     key_registry: KeyRegistry = field(default_factory=KeyRegistry)
     nonces: NonceStore = field(default_factory=NonceStore)
     dispatcher: HardwareDispatcher = field(default_factory=GatedDispatcher)
@@ -82,6 +98,9 @@ class ServerContext:
     verifier: SignatureVerifier = field(init=False)
     arbiter: PrecedenceArbiter = field(init=False)
     stream_sessions: StreamSessionRegistry = field(init=False)
+    drones: FleetRegistry = field(init=False)
+    scheduler: FleetScheduler = field(init=False)
+    emergency: EmergencyStopService = field(init=False)
     handlers: Mapping[ToolName, ToolHandler] = field(init=False)
 
     def __post_init__(self) -> None:
@@ -93,6 +112,21 @@ class ServerContext:
         )
         self.verifier = SignatureVerifier(self.key_registry, self.nonces, clock=self.clock)
         self.arbiter = PrecedenceArbiter(self.policy, self.audit, clock=self.clock)
+
+        self.drones = self.fleet_registry or FleetRegistry(clock=self.clock)
+        self.scheduler = self.fleet_scheduler or FleetScheduler(
+            self.drones, clock=self.clock
+        )
+
+        # The stop channel must not be the path it exists to survive. Checked here, at
+        # composition time, so a server wired that way refuses to start rather than
+        # discovering it during the one event it matters for. Raising is correct: a
+        # boot failure is loud, and a stop that travels down the failed command path is
+        # a silent one.
+        channel = self.stop_channel or InMemoryBroadcastChannel()
+        assert_channel_independence(channel, self.dispatcher)
+        self.emergency = EmergencyStopService(channel, self.audit, clock=self.clock)
+
         self.handlers = build_handlers(self)
 
     def now(self) -> datetime:
@@ -102,11 +136,15 @@ class ServerContext:
 def build_handlers(ctx: ServerContext) -> dict[ToolName, ToolHandler]:
     """Construct the tool handlers this server exposes.
 
-    Only the three tools this milestone implements are registered. A tool whose
-    contract exists in ``schemas.tools`` but has no handler here is *not* exposed --
-    the JSON-RPC dispatcher reports it as method-not-found, which is the correct
-    answer for a tool that is specified but not built. Registering a placeholder
-    would be worse: it would advertise a capability the server does not have.
+    Only the tools that are actually implemented are registered. A tool whose contract
+    exists in ``schemas.tools`` but has no handler here is *not* exposed -- the
+    JSON-RPC dispatcher reports it as method-not-found, which is the correct answer
+    for a tool that is specified but not built. Registering a placeholder would be
+    worse: it would advertise a capability the server does not have.
+
+    ``execute_safe_return`` is the one remaining gap, and deliberately so: an RTL is a
+    command to an airborne airframe, and every path to one runs through the dispatch
+    seam that CLAUDE.md §2.1 holds closed.
     """
     return {
         ToolName.CHECK_AIRSPACE_CLEARANCE: CheckAirspaceClearanceHandler(ctx.feed),
@@ -126,5 +164,14 @@ def build_handlers(ctx: ServerContext) -> dict[ToolName, ToolHandler]:
             store=ctx.store,
             verifier=ctx.verifier,
             dispatcher=ctx.dispatcher,
+        ),
+        ToolName.GET_FLEET_STATUS: GetFleetStatusHandler(
+            registry=ctx.drones,
+            scheduler=ctx.scheduler,
+        ),
+        ToolName.REQUEST_EMERGENCY_STOP: RequestEmergencyStopHandler(
+            service=ctx.emergency,
+            fleet=ctx.drones,
+            verifier=ctx.verifier,
         ),
     }

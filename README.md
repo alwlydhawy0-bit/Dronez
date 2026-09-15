@@ -14,13 +14,16 @@ tree by a test, not merely documented.
 
 ---
 
-## ⚠️ Status: Milestone-0 gate open. Nothing here actuates hardware.
+## ⚠️ Status: the server runs, and nothing reaches hardware.
 
 **No flight-capable code may be written until the Milestone-0 gate closes.** Read
 **[`CLAUDE.md`](CLAUDE.md) §2** before writing anything — it lists exactly what is permitted.
 
-The Milestone-1 layers built so far are validation and authorization only: a proposal can be
-validated and authorized, and then it goes nowhere. There is no dispatcher.
+The MCP server is complete through the human authorization gate. A proposal is
+schema-validated, airspace-cleared against the live sovereign feed, policy-authorized,
+and human-confirmed with a verified hardware-bound signature — and then
+[`dispatch.py`](src/mcp_server/dispatch.py) **refuses**, because the gate is open. That
+refusal is the boundary of this milestone, and a test asserts it.
 
 | # | Milestone-0 criterion | State |
 | --- | --- | --- |
@@ -43,6 +46,20 @@ validated and authorized, and then it goes nowhere. There is no dispatcher.
   authorization on any error path; and a mock channel with 11 injectable faults.
 - **STRIDE threat model** — 52 threats across 8 trust boundaries, with deep dives on prompt
   injection, command hijacking and GPS spoofing, and a matrix mapping threats to real tests.
+
+**Milestone 1 — the server**
+
+- **FastAPI MCP server** over JSON-RPC 2.0 at `POST /rpc`, TLS 1.3 enforced (verified by real
+  handshakes — a TLS 1.2 client is refused). Security headers, host allow-list, body caps, and
+  an append-only audit record for *every* attempt including the rejected ones.
+- **`check_airspace_clearance`** — refreshes the live NFZ/GACA feed before deciding, so the
+  answer reflects the feed at decision time. Stale or unreachable ⇒ denial, never a fallback
+  to the last known picture.
+- **`deploy_recon_waypoint`** — obtains its own clearance (a caller cannot supply one), then
+  the OPA gate, then stages a digest-addressed plan. Never dispatches.
+- **`confirm_flight_plan`** — the server-enforced human gate: ES256 signature over the plan
+  digest *and* the decision, bound to the operator's FIDO2 credential, with single-use nonces
+  and single-use plans. Closes `TM-14` and `TM-15`.
 
 **Milestone 1 — validation and authorization**
 
@@ -71,7 +88,7 @@ validated and authorized, and then it goes nowhere. There is no dispatcher.
 | **[`CLAUDE.md`](CLAUDE.md)** | **Project memory. Read first.** Identity, Zero-Trust rules, safety envelope, tool schemas, open items, exception log |
 | [`docs/02-security-threat-model.md`](docs/02-security-threat-model.md) | STRIDE model for the full chain |
 | [`docs/03-nfz-gaca-sync-channel.md`](docs/03-nfz-gaca-sync-channel.md) | NFZ channel design and how to connect the live endpoint |
-| [`docs/04-authorization-chain.md`](docs/04-authorization-chain.md) | The Milestone-1 validation and authorization chain, layer by layer |
+| [`docs/04-authorization-chain.md`](docs/04-authorization-chain.md) | The authorization chain, layer by layer, and where dispatch stops |
 
 ## Development
 
@@ -80,7 +97,7 @@ lets the schema and clearance logic be fuzzed as pure functions.
 
 ```bash
 python3 -m pip install -e '.[dev]'
-python3 -m pytest tests               # 244 tests
+python3 -m pytest tests               # 330 tests
 python3 scripts/verify_milestone0.py  # gate invariants + criteria status
 scripts/verify_policies.sh            # opa check --strict + opa fmt + opa test
 ```

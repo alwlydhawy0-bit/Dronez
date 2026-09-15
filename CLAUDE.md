@@ -5,13 +5,13 @@
 > later engineering or AI-agent session inherits them instead of re-deriving — or silently
 > re-relaxing — a safety decision that is already settled.
 >
-> **Status: Milestone 0 gate OPEN. Milestone-1 validation and authorization layers built.**
-> Three Milestone-0 criteria remain open (§2) and **no flight-capable code has been
-> written**. The Milestone-1 work delivered so far — strict tool schemas, the prompt
-> sanitizer and rate limits, and the deterministic policy engine — is validation and
-> authorization only: nothing in this repository actuates hardware. Section 2 lists what
-> may and may not be built right now. It is the shortest section and the one that binds
-> hardest.
+> **Status: Milestone 0 gate OPEN. The MCP server runs, and nothing reaches hardware.**
+> Three Milestone-0 criteria remain open (§2). The server is complete through the human
+> authorization gate: a proposal is schema-validated, airspace-cleared, policy-authorized,
+> human-confirmed with a verified hardware-bound signature — and then
+> `mcp_server/dispatch.py` **refuses**, because the gate is open. That refusal is the
+> deliverable boundary of this milestone, and `test_confirmed_plan_is_authorized_but_not_dispatched`
+> asserts it. Section 2 lists what may and may not be built right now.
 
 ---
 
@@ -81,11 +81,14 @@ physical safety envelope depended on the AI agent behaving correctly:
 
 Do **not**, in this repository, until the gate closes and this file says so:
 
-- Write anything that commands, arms, or actuates hardware — no MAVLink/ROS2 publisher, no
-  dispatcher, no flight-controller bridge. **This is the line the Milestone-1 work stops at:**
-  a proposal can now be validated and authorized, and then it goes nowhere.
-- Wire an MCP tool endpoint to a dispatch path. The schemas in `mcp_server/schemas/` define the
-  contracts; serving them is fine, *acting* on an approval is not.
+- **Implement `HardwareDispatcher`.** `mcp_server/dispatch.py` is the single seam where a
+  plan would reach an airframe, and `GatedDispatcher` refuses every call. Replacing it is the
+  one change that lets this system fly, and it must not happen until §2's criteria close.
+  Its docstring lists what a real implementation additionally owes: MAVLink2 signing, mTLS
+  plus firmware attestation, the 2 commands/second dispatch limit, and never overriding a
+  firmware fail-safe.
+- Write anything else that commands or arms hardware — no MAVLink/ROS2 publisher, no
+  flight-controller bridge.
 - Wire an LLM or agent SDK into this repository. The agent lives in a separate service and has
   no direct actuation path. The sanitizer is a client of an isolated service, not an agent.
 - Import an LLM client into `src/policy_engine/`. Ever. Authorization is deterministic code
@@ -277,14 +280,18 @@ A kinetic bound with a `server`-only locus is a design defect, and
 | NFZ bulletin wire contract | `nfz-bulletin/1.0.0` | **Implemented** | `dronez/airspace/schema.py` |
 | MCP tool schema envelope | `mcp-tools/1.0.0` | **Implemented** | `mcp_server/schemas/base.py` |
 | `IncidentZone` | — | **Implemented** (closes `TM-01`, pending review) | `mcp_server/schemas/incident_zone.py` |
-| `deploy_recon_waypoint` | `deploy_recon_waypoint/1.0.0` | **Schema + policy implemented.** No dispatch path. | `mcp_server/schemas/tools.py`, `policy_engine/policies/` |
-| `check_airspace_clearance` | `check_airspace_clearance/1.0.0` | **Schema + decision logic implemented** | `mcp_server/schemas/tools.py`, `dronez/airspace/client.py` |
-| `confirm_flight_plan` | `confirm_flight_plan/1.0.0` | **Schema implemented.** Signature *verification* outstanding (`TM-14`). | `mcp_server/schemas/tools.py` |
-| `execute_safe_return` | `execute_safe_return/1.0.0` | **Schema implemented** | `mcp_server/schemas/tools.py` |
-| `stream_thermal_feed` | `stream_thermal_feed/1.0.0` | **Schema implemented** — pipeline is Milestone 2 | `mcp_server/schemas/tools.py` |
-| `get_fleet_status` | `get_fleet_status/1.0.0` | **Schema implemented** — scheduling is Milestone 3 | `mcp_server/schemas/tools.py` |
-| `request_emergency_stop` | `request_emergency_stop/1.0.0` | **Schema implemented** — broadcast channel is Milestone 4 | `mcp_server/schemas/tools.py` |
+| `deploy_recon_waypoint` | `deploy_recon_waypoint/1.0.0` | **SERVED.** Obtains its own clearance, then the policy gate, then stages. Never dispatches. | `mcp_server/tools/deploy.py` |
+| `check_airspace_clearance` | `check_airspace_clearance/1.0.0` | **SERVED.** Refreshes the live feed before deciding; stale ⇒ denial. | `mcp_server/tools/clearance.py` |
+| `confirm_flight_plan` | `confirm_flight_plan/1.0.0` | **SERVED.** ES256 signature verification and single-use nonces (closes `TM-14`, `TM-15`). | `mcp_server/tools/confirm.py` |
+| `execute_safe_return` | `execute_safe_return/1.0.0` | Schema only — not served | `mcp_server/schemas/tools.py` |
+| `stream_thermal_feed` | `stream_thermal_feed/1.0.0` | Schema only — pipeline is Milestone 2 | `mcp_server/schemas/tools.py` |
+| `get_fleet_status` | `get_fleet_status/1.0.0` | Schema only — scheduling is Milestone 3 | `mcp_server/schemas/tools.py` |
+| `request_emergency_stop` | `request_emergency_stop/1.0.0` | Schema only — broadcast channel is Milestone 4 | `mcp_server/schemas/tools.py` |
+
 | `get_airspace_status` | — | Specified only — read-only display, **never** a dispatch gate | — |
+
+A tool with a contract but **no handler** is reported as method-not-found rather than
+advertised. Registering a placeholder would announce a capability the server does not have.
 
 **Ingress rule.** Requests are validated with `StrictModel.parse_json()` on the raw bytes,
 never `model_validate()` on a pre-parsed `dict`. Pydantic's strict mode is stricter in Python
@@ -299,9 +306,11 @@ than best-effort parsing it.
 
 ### 5.1 `check_airspace_clearance` — the mandatory pre-dispatch gate
 
-The only tool whose logic exists today. Its contract, verbatim from Master Plan §5:
-`deploy_recon_waypoint` **MUST** call it and receive an affirmative clearance before dispatch,
-and *a stale, unreachable, or negative clearance response fails the dispatch closed.*
+Its contract, verbatim from Master Plan §5: `deploy_recon_waypoint` **MUST** call it and
+receive an affirmative clearance before dispatch, and *a stale, unreachable, or negative
+clearance response fails the dispatch closed.* `deploy_recon_waypoint` calls it **internally**
+(`mcp_server/tools/deploy.py`) rather than accepting a clearance from the caller — a
+caller-supplied clearance is a caller-supplied authorization.
 
 Implemented decision order (`AirspaceClearanceService.check_clearance`) — the order matters:
 
@@ -319,9 +328,9 @@ Implemented decision order (`AirspaceClearanceService.check_clearance`) — the 
 
 Any unexpected exception becomes `INTERNAL_ERROR` **and a denial**. This method does not raise.
 
-### 5.2 `deploy_recon_waypoint` — specified, not implemented
+### 5.2 `deploy_recon_waypoint` — served
 
-Recorded here so Milestone 1 does not re-derive it:
+The contract it implements:
 
 - **Input:** `mission_id` (must reference an active, non-expired `IncidentZone`), `polygon`
   (GeoJSON, wholly inside the mission boundary), `altitude_min`/`altitude_max`, `velocity_max`,
@@ -406,8 +415,10 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 | `TM-11` | GACA registration and spectrum licensing not initiated | **Open — organizational, blocks Milestone-0 gate** | M0, criterion 5 |
 | `TM-12` | No HIL rig; the "server disconnected, fail-safe still works" test cannot yet run | **Open** — this is the single most important test in the programme | M1 |
 | `TM-13` | **The Rego bundle has never been executed.** `opa` could not be installed (blocked by egress policy), so the policies are verified only structurally by `tests/policy/test_policy_bundle.py` | **Open — blocks Milestone-0 criterion 6.** Mitigated in one direction: an unloadable policy leaves the path undefined, which `PolicyEngine` treats as a denial, so the failure mode is an outage rather than a bypass. Run `scripts/verify_policies.sh --require-opa`. | M1 |
-| `TM-14` | Command signature **verification** not implemented; `CommandSignature` defines the shape, nothing checks the cryptography | **Open** — schemas make an unsigned command unrepresentable, but a forged one would still parse | M1 |
-| `TM-15` | No nonce store; `CommandSignature.nonce` is carried but never consumed, so an exact replay inside the validity window is not yet rejected | **Open** | M1 |
+| `TM-14` | Command signature **verification** not implemented | **Closed** — `mcp_server/signing.py` verifies ES256/ES384/RS256/PS256 over canonical bytes that include the plan digest and the decision, bound to the operator's registered FIDO2 credential. `cryptography` is optional; absent, those algorithms are rejected rather than skipped. | M1 |
+| `TM-15` | No nonce store, so an exact replay inside the validity window is not rejected | **Closed** — `NonceStore`, TTL-bounded and consumed only *after* the signature verifies, so a bad signature cannot burn a legitimate nonce. | M1 |
+| `TM-17` | The identity provider is a static token resolver; real OIDC + JWKS verification and device-posture attestation are not implemented | **Open** — `PrincipalResolver` is the seam. The principal is already server-derived, so role and zone scoping cannot be set by a request. | M1 |
+| `TM-18` | The flight-plan staging store and nonce store are in-process, so single-use consumption does not hold across instances | **Open** — a multi-instance deployment could confirm one plan once per instance. Blocks the HA/active-active work. | M3 |
 | `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Accepted, not load-bearing** — the deterministic policy gate is what must hold; see §3.2. Closes against the `TM-10` corpus. | M5 |
 
 ---
@@ -458,6 +469,17 @@ src/dronez/                 Milestone 0 — stdlib only, no dependencies
   airspace/client.py        Fail-closed sync + clearance decision logic (§5.1)
   airspace/mock_client.py   Development channel with injectable faults — NOT production
 src/mcp_server/             Milestone 1 — the MCP boundary
+  app.py                    FastAPI app; JSON-RPC endpoint and the gate order
+  jsonrpc.py                Strict JSON-RPC 2.0 envelope, bounded batches
+  security.py               TLS 1.3 context, auth, security headers, host allow-list
+  signing.py                ES256 signature verification + nonce store (TM-14, TM-15)
+  store.py                  Digest-addressed, single-use flight-plan staging
+  audit.py                  Append-only Command record; records EVERY attempt
+  dispatch.py               The hardware seam. GatedDispatcher REFUSES. Read before editing.
+  feed.py                   Live NFZ refresh: background loop + on-demand before a decision
+  context.py                Composition root; fail-closed defaults
+  repositories.py           Mission/zone/fleet lookups — server-derived facts only
+  tools/                    The three served handlers
   schemas/base.py           StrictModel: closed-world, immutable, strict; parse_json ingress
   schemas/geo.py            GeoPolygon, bounded and closed-ring validated
   schemas/identity.py       Roles, FIDO2-bound signatures, the precedence matrix
@@ -475,6 +497,7 @@ tests/
   contract/                 Wire-schema rejection cases
   adversarial/              Fail-closed sweeps — NFZ faults and guardrail bypasses
   policy/                   Policy-engine failure modes and Rego bundle structure
+  server/                   End-to-end over the real HTTP surface, incl. TLS handshakes
 docs/                       Threat model and ADRs
 migrations/                 PostgreSQL + PostGIS schema
 scripts/                    Developer tooling
@@ -482,15 +505,17 @@ infra/                      Terraform / Kubernetes (IaC only; no manual console 
 ```
 
 **Dependencies.** `dronez` stays stdlib-only so the envelope and clearance logic remain
-fuzzable as pure functions. Milestone 1 adds exactly one runtime dependency — `pydantic`,
-because Zero-Trust §3.1 mandates strict schema enforcement and hand-rolling it across seven
-tool contracts would trade a reviewed dependency for unreviewed validation code. The
-authorization path adds none: `policy_engine.client` speaks to OPA over `urllib`.
+fuzzable as pure functions. The server adds `pydantic` (Zero-Trust §3.1 mandates strict schema
+enforcement, and hand-rolling it across seven contracts would trade a reviewed dependency for
+unreviewed validation code) plus `fastapi`/`uvicorn`. `cryptography` is **optional**: without
+it the ES256/RS256 verifiers are absent from the registry, so a request naming them is
+rejected rather than passing unverified. The authorization path itself adds nothing —
+`policy_engine.client` speaks to OPA over `urllib`.
 
 ### 10.2 Commands
 
 ```bash
-python3 -m pytest tests                  # full suite (244 tests)
+python3 -m pytest tests                  # full suite (330 tests)
 python3 -m ruff check src tests scripts  # lint
 python3 -m mypy src                      # strict type check
 python3 scripts/verify_milestone0.py     # gate invariants + criteria status

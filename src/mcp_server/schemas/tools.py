@@ -121,6 +121,9 @@ class RejectionCode(StrEnum):
     PLAN_DIGEST_MISMATCH = "plan_digest_mismatch"
     CONFIRMATION_REQUIRED = "confirmation_required"
     POLICY_ENGINE_UNAVAILABLE = "policy_engine_unavailable"
+    #: The plan was fully authorized but the hardware dispatch seam refused it. Distinct
+    #: from an internal error: nothing went wrong, the gate is deliberately shut.
+    DISPATCH_GATE_CLOSED = "dispatch_gate_closed"
     INTERNAL_ERROR = "internal_error"
 
 

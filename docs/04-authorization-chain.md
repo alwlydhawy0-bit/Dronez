@@ -3,7 +3,7 @@
 | | |
 | --- | --- |
 | **Milestone** | 1 |
-| **Status** | Layers 1–4 implemented. **No dispatch path exists** (Milestone-0 gate still open). |
+| **Status** | The server runs. Layers 1–5 implemented; layer 6 **refuses** (Milestone-0 gate open). |
 | **Code** | `src/mcp_server/`, `src/policy_engine/` |
 
 Zero-Trust §4.2 states the design in one sentence: *"Model output NEVER directly authorizes an
@@ -36,13 +36,18 @@ code."* This document is how that sentence is implemented.
  └──────────┬───────────┘
             ▼
  ┌──────────────────────┐
- │ 5. HUMAN CONFIRM     │  NOT YET IMPLEMENTED — schema only
+ │ 5. HUMAN CONFIRM     │  ES256 signature over the plan digest + decision;
+ │                      │  single-use nonce; single-use staged plan
  └──────────┬───────────┘
             ▼
  ┌──────────────────────┐
- │ 6. DISPATCH          │  DOES NOT EXIST — blocked by the Milestone-0 gate
+ │ 6. DISPATCH          │  GatedDispatcher REFUSES — Milestone-0 gate open
  └──────────────────────┘
 ```
+
+Served over JSON-RPC 2.0 at `POST /rpc`, TLS 1.3 enforced. Three tools are served:
+`check_airspace_clearance`, `deploy_recon_waypoint`, `confirm_flight_plan`. The other four
+have contracts but no handler, and are reported as method-not-found rather than advertised.
 
 **Layers 1–3 are defence in depth that will eventually fail.** Rate limits can be evaded with
 patience, injection classifiers are probabilistic, and a schema cannot tell a legitimate
@@ -157,15 +162,36 @@ The client fails closed on everything: unreachable, timeout, non-200, oversized 
 JSON, missing `result`, or an `allow` that is not literally `True`. An undefined policy path —
 what OPA returns when a policy fails to load — is a denial, not an open gate.
 
-### 2.5 Human confirmation — schema only
+### 2.5 Human confirmation — `tools/confirm.py`
 
-`ConfirmFlightPlanRequest` binds to a `flight_plan_digest`, not just an ID. The operator
-approves *that* digest; if the staged plan changed after it was rendered for review, the digest
-no longer matches and the confirmation is refused. This closes the TOCTOU window between
-"operator read the map overlay" and "server dispatched a plan".
+Six checks, each closing a distinct hole:
 
-Signature **verification** is not implemented (`TM-14`), and there is no nonce store, so an
-exact replay inside the validity window is not yet rejected (`TM-15`).
+| Check | What it stops |
+| --- | --- |
+| Principal is a human tier | An agent confirming its own proposal |
+| Principal matches the envelope issuer | Submitting someone else's authorization |
+| Signature verifies over plan digest **and** decision | Replaying an approval onto another plan, or as a rejection |
+| Nonce unconsumed | Replaying the same approval twice |
+| Staged plan matches the digest | A plan altered after it was reviewed |
+| Plan consumed atomically, once | One approval dispatching twice |
+
+Two orderings are load-bearing. The **nonce is consumed only after the signature verifies** —
+consuming first would let an attacker burn a legitimate operator's nonce with a garbage
+signature, turning verification into a denial-of-service primitive. And the **staged plan is
+checked and removed under one lock**, so two concurrent confirmations cannot both succeed.
+
+Closes `TM-14` and `TM-15`.
+
+### 2.6 Dispatch — `dispatch.py`, and it refuses
+
+Every gate above passes and the plan still does not reach an airframe. `GatedDispatcher`
+returns `REFUSED_GATE` with the reason, the authorization is recorded with
+`authorization_complete: true`, and the caller gets `dispatched: false` with a
+`dispatch_gate_closed` rejection.
+
+This is a named, tested seam rather than an absence, because a codebase where dispatch is
+simply missing invites the next contributor to add a MAVLink publish wherever is convenient.
+There is exactly one place to look and one place to change.
 
 ---
 
@@ -173,9 +199,9 @@ exact replay inside the validity window is not yet rejected (`TM-15`).
 
 | Absent | Why |
 | --- | --- |
-| Dispatcher / MAVLink bridge | Milestone-0 gate is open. This is the line the work stops at. |
-| Signature verification | `TM-14`. The schema makes an unsigned command unrepresentable; a forged one would still parse. |
-| Nonce store | `TM-15`. |
+| MAVLink bridge behind the dispatch seam | Milestone-0 gate is open. This is the line the work stops at. |
+| Real OIDC / JWKS identity provider | `TM-17`. `PrincipalResolver` is the seam; the principal is already server-derived. |
+| Shared staging and nonce stores | `TM-18`. In-process today, so single-use does not hold across instances. |
 | A Python reimplementation of the policy rules | Two implementations of an authorization decision drift, and the one that is wrong is the one nobody is looking at. `policy_engine.models` builds inputs and parses decisions; it holds no authorization logic. |
 | A cache of affirmative decisions | Would be a way to get a "yes" without the policy having said so. |
 | An `allow_on_error` flag | Same. |
@@ -191,6 +217,9 @@ exact replay inside the validity window is not yet rejected (`TM-15`).
 | Schemas | `tests/unit/test_schemas.py` | ✅ |
 | Policy **client** | `tests/policy/test_policy_engine.py` | ✅ every failure mode denies |
 | Policy **Rego** | `scripts/verify_policies.sh` | ⚠️ **never executed** — see below |
+| Signature + nonce | `tests/server/test_tools.py` | ✅ forged, wrong-plan, wrong-decision, unknown-key, replayed-nonce |
+| Transport / TLS 1.3 | `tests/server/test_tls.py` | ✅ real handshakes; a 1.2 client is refused |
+| Full request path | `tests/server/` | ✅ 51 tests over the real HTTP surface |
 
 > ### ⚠️ `TM-13` — the Rego bundle is unverified
 >

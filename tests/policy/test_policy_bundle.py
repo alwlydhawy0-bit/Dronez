@@ -36,6 +36,32 @@ def test_bundle_is_not_empty() -> None:
     assert TEST_FILES, "no *_test.rego suites found"
 
 
+@pytest.mark.parametrize("path", POLICY_FILES, ids=lambda p: p.name)
+def test_every_policy_has_a_test_suite(path: Path) -> None:
+    """Coverage gate: a policy with no suite is a policy nobody has exercised.
+
+    `opa test` reports coverage only for the files it is given; a policy with no
+    `_test.rego` beside it simply never appears in the report, so its absence is
+    silent. This makes it loud.
+    """
+    expected = path.with_name(f"{path.stem}_test.rego")
+    assert expected.exists(), (
+        f"{path.name} has no {expected.name}; every policy in the authorization path "
+        "carries its own native opa test suite"
+    )
+
+
+@pytest.mark.parametrize("path", TEST_FILES, ids=lambda p: p.name)
+def test_every_test_suite_declares_cases(path: Path) -> None:
+    """A suite that parses but asserts nothing passes `opa test` silently."""
+    cases = re.findall(r"^test_\w+", path.read_text(encoding="utf-8"), re.MULTILINE)
+    assert len(cases) >= 5, f"{path.name} declares only {len(cases)} test rules"
+    assert len(cases) == len(set(cases)), (
+        f"{path.name} declares duplicate test names; Rego takes the last definition, "
+        "so the earlier case never runs"
+    )
+
+
 @pytest.mark.parametrize("path", POLICY_FILES + TEST_FILES, ids=lambda p: p.name)
 def test_every_file_declares_a_package_and_imports_rego_v1(path: Path) -> None:
     text = path.read_text(encoding="utf-8")

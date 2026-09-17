@@ -151,6 +151,42 @@ refusal is the boundary of this milestone, and a test asserts it.
 > `tests/policy/test_policy_bundle.py` only. Run `scripts/verify_policies.sh --require-opa`
 > where `opa` is available; CI must gate on it.
 
+**Milestone 5 — verification and the release gate**
+
+- **Contract tests for all 7 tool schemas** — driven as a *wire* contract through
+  `parse_json` on raw bytes, because that is the ingress path a request actually takes.
+  Undeclared fields, smuggled authorization fields, NaN, type confusion, hostile
+  identifiers and malformed geometry are all swept generically across every tool.
+- **Rego coverage gate** — `clearance.rego` and `precedence.rego` had no test suites at
+  all; they now carry 59 native `opa test` cases, and a gate asserts every policy has a
+  suite beside it. `opa test` reports coverage only for files it is given, so a policy
+  with no suite is silently absent from the report rather than visibly missing.
+- **Fail-safe scenario harness** (`sitl_harness/`) — the 18 DVIL cases from the firmware
+  spec plus 5 RTL cases, as executable data with a backend-independent oracle. The PX4
+  and rig backends **raise rather than existing**, because driving PX4 means publishing
+  MAVLink and §2.1 forbids that here. A green run against the built-in firmware *model*
+  proves the scenarios and oracles are well-formed and nothing more — `EvidenceClass`
+  carries that into every report, and `closes_hil_gate()` is true only for hardware.
+- **Adversarial prompt-injection corpus** (`redteam/`, `TM-10`) — 44 cases across 13
+  techniques and all 6 content channels, plus 10 benign controls. Measured detection is
+  **61.4%**, reported rather than tuned: a case is never deleted for failing, and a
+  benign control is never weakened to clear a false positive. Every bypass is then
+  driven at the real MCP boundary and must *still* be refused — which it is, largely
+  because **no agent-proposable tool has a free-text field to put a payload in**.
+- **Parser fuzzing** — 5 targets on untrusted input, 20 000 mutational cases, clean. The
+  harness validates its own seeds first, which immediately caught an invalid bulletin
+  seed that had silently reduced that target to "everything is rejected".
+- **Release gate** (`scripts/verify_release_gates.py`) — 20 gates from Zero-Trust §11.1,
+  each reporting PASS, FAIL, or **NOT MET**. A gate whose evidence lives outside this
+  repository blocks exactly as hard as a failing one, because "we could not check" is
+  not "we are fine".
+
+> **Current status: RELEASE BLOCKED** — 7 passed, 1 failed, 12 not met. Two findings
+> from this pass are open and deliberately unfixed: `TM-29`, where the sanitizer blocks
+> a legitimate command-room relay (narrowing a validation rule to make a gate pass is
+> what §10.5 forbids, so it is a human's call), and `TM-30`, where the heuristic screen
+> is English-only while the UI is Arabic-first.
+
 ## Documentation
 
 | Document | What it is |
@@ -162,6 +198,7 @@ refusal is the boundary of this milestone, and a test asserts it.
 | [`docs/05-command-signing-and-precedence.md`](docs/05-command-signing-and-precedence.md) | Non-repudiation signing, MAVLink2 message signing, and the Role Precedence Matrix |
 | [`docs/06-evidentiary-pipeline.md`](docs/06-evidentiary-pipeline.md) | Edge frame hashing, the WORM chain of custody, DTLS/SRTP, and degradation |
 | [`docs/07-degraded-landing-firmware-spec.md`](docs/07-degraded-landing-firmware-spec.md) | The firmware-resident dual-failure landing state, and the HIL criteria that accept an implementation of it |
+| [`docs/08-verification-and-release-gates.md`](docs/08-verification-and-release-gates.md) | What each harness proves, what it cannot prove, and the current release-gate status |
 
 ## Development
 
@@ -170,7 +207,7 @@ lets the schema and clearance logic be fuzzed as pure functions.
 
 ```bash
 python3 -m pip install -e '.[dev]'
-python3 -m pytest tests               # 880 tests
+python3 -m pytest tests               # 1347 tests
 python3 scripts/verify_milestone0.py  # gate invariants + criteria status
 scripts/verify_policies.sh            # opa check --strict + opa fmt + opa test
 ```

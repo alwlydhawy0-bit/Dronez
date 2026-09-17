@@ -523,7 +523,7 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 | `TM-07` | Polygon self-intersection not detected | **Accepted for M0** — no flight code consumes it; PostGIS `ST_IsValid` is the gate | M1 |
 | `TM-08` | Transport (mTLS, cert pinning, egress proxy) not implemented; `NfzSyncChannel` is a seam only | **Open by design** — M0 scope is the protocol, not the socket | M1 |
 | `TM-09` | Prompt-sanitization node not deployed | **Open** — required live from M3, ahead of any multi-agent scenario | M3 |
-| `TM-10` | Adversarial prompt-injection/jailbreak corpus does not exist | **Open** — release-blocking gate per Zero-Trust §11.1 | M5 |
+| `TM-10` | Adversarial prompt-injection/jailbreak corpus does not exist | **Built and baselined** — `src/redteam/corpus.py`: 44 adversarial cases across 13 techniques and all 6 content channels, plus 10 benign controls. Measured detection **61.4%** against the heuristic screen; every miss is annotated with its root cause and what stops it instead. Still **open as a release gate** until the sanitizer is actually deployed (`TM-09`). Run `scripts/run_redteam.py`. | M5 |
 | `TM-11` | GACA registration and spectrum licensing not initiated | **Open — organizational, blocks Milestone-0 gate** | M0, criterion 5 |
 | `TM-12` | No HIL rig; the "server disconnected, fail-safe still works" test cannot yet run | **Open** — this is the single most important test in the programme | M1 |
 | `TM-13` | **The Rego bundle has never been executed.** `opa` could not be installed (blocked by egress policy), so the policies are verified only structurally by `tests/policy/test_policy_bundle.py` | **Open — blocks Milestone-0 criterion 6.** Mitigated in one direction: an unloadable policy leaves the path undefined, which `PolicyEngine` treats as a denial, so the failure mode is an outage rather than a bypass. Run `scripts/verify_policies.sh --require-opa`. | M1 |
@@ -541,7 +541,10 @@ Full detail in `docs/02-security-threat-model.md` §7. Summary of what is **not*
 | `TM-27` | **The DVIL specification is unvalidated against hardware.** `degraded_descent_rate_mps` and `degraded_min_obstacle_clearance_m` are engineering defaults, not values measured against a specific ultrasonic/LiDAR array's range, sample rate and minimum sensing distance — and no airframe is selected | **Open.** [`docs/07-degraded-landing-firmware-spec.md`](docs/07-degraded-landing-firmware-spec.md) §8 lists the 18 HIL cases that close it; all 18 are unexecuted for want of a rig (`TM-12`). The server-side invariant — that no ground path reaches the state — is implemented and tested. | M4 |
 | `TM-28` | The fleet registry and scheduler are in-process, so two server instances could reserve the same airframe for two missions | **Open** — mitigated in one direction: `deploy_recon_waypoint` re-derives fleet facts at decision time and the policy gate re-checks them, so a double reservation produces a denial rather than two dispatches. Blocks the HA/active-active work alongside `TM-18`. | M3 |
 | `TM-18` | The flight-plan staging store and nonce store are in-process, so single-use consumption does not hold across instances | **Open** — a multi-instance deployment could confirm one plan once per instance. Blocks the HA/active-active work. | M3 |
-| `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Accepted, not load-bearing** — the deterministic policy gate is what must hold; see §3.2. Closes against the `TM-10` corpus. | M5 |
+| `TM-29` | **The sanitizer blocks legitimate operator traffic.** The pattern `(new\|updated\|revised) (system )?(instructions\|prompt\|directive)` makes `system` optional, so "Command room has issued new instructions for the perimeter sweep" is refused (corpus case `BEN-003`) | **Open — fails the red-team gate today.** Not fixed in this pass: narrowing a validation rule is exactly what §10.5 forbids doing to make something pass, so the call belongs to a human. Silencing an operator mid-incident is a safety failure, not a nuisance. | M2 |
+| `TM-30` | **The heuristic screen is English-only while the UI is Arabic-first.** Corpus cases `INJ-090`/`INJ-091` pass unblocked, including one arriving on the sensor channel | **Open.** The deployed Llama Guard classifier is multilingual, so the production stack is not blind — but that node is not deployed (`TM-09`), so nothing covers it in practice today. The most consequential finding of the corpus work. | M3 |
+| `TM-31` | **The native-code fuzzing gate has no target.** Zero-Trust §9 makes ASan/UBSan/MSan release-blocking for native code; there is none here, so the gate has not been reached rather than satisfied | **Open by design** — `scripts/fuzz_native.sh` reports NO TARGET and fails under `--require-native`. The Python parsers that do exist are fuzzed by `scripts/fuzz_parsers.py`. Closes when the MAVLink2/ROS2 parsers exist and carry libFuzzer harnesses. | M5 |
+| `TM-16` | Sanitizer heuristics are a fixed pattern list with no measured false-negative rate | **Measured** — 17 of 44 corpus cases are missed by the heuristic layer (38.6%), each documented in `redteam.corpus`. Remains **accepted and not load-bearing**: `tests/server/test_injection_end_to_end.py` asserts every bypass is still refused by schema, capability scope or the policy gate. | M5 |
 
 ---
 
@@ -629,6 +632,14 @@ src/edge_node/              Jetson-class edge compute. NO TRANSPORT.
   detection.py              DetectionEvent, bound to the frame it came from
   degradation.py            Tier ladder. Detection is never sheddable.
   pipeline.py               capture -> hash -> archive (always) -> transmit (maybe)
+src/redteam/                Milestone 5 — the adversarial corpus (TM-10). Data, never
+  corpus.py                 instructions. 44 injection cases + 10 benign controls,
+  report.py                 scored honestly: misses are annotated, never deleted.
+src/sitl_harness/           Milestone 5 — fail-safe scenario harness. NO TRANSPORT.
+  scenarios.py              The 18 DVIL cases + 5 RTL cases, as executable data
+  backend.py                The seam. PX4 and rig backends RAISE — read before adding
+  model.py                  A firmware MODEL. Proves the oracles, never the firmware
+  runner.py                 The oracle, backend-independent, plus evidence class
 src/policy_engine/          Milestone 1 — the deterministic gate. No LLM, ever.
   policies/*.rego           Containment, envelope bounds, clearance, precedence, override
   policies/data/            Safety envelope as OPA data — GENERATED, do not hand-edit
@@ -642,6 +653,7 @@ tests/
   server/                   End-to-end over the real HTTP surface, incl. TLS handshakes
   bridge/                   MAVLink signing and the operator-token binding
   fleet/                    Registry availability rules and scheduler arbitration
+  hil/                      Mutation tests proving the fail-safe oracles can fail
   edge/, evidence/          Frame hashing, chain of custody, WORM, degradation
 docs/                       Threat model and ADRs
 migrations/                 PostgreSQL + PostGIS schema
@@ -660,7 +672,7 @@ rejected rather than passing unverified. The authorization path itself adds noth
 ### 10.2 Commands
 
 ```bash
-python3 -m pytest tests                  # full suite (880 tests)
+python3 -m pytest tests                  # full suite (1347 tests)
 python3 -m ruff check src tests scripts  # lint
 python3 -m mypy src                      # strict type check
 python3 scripts/verify_milestone0.py     # gate invariants + criteria status
@@ -671,7 +683,21 @@ python3 scripts/envelope_report.py       # digest + table to paste into §4.3
 
 # The Rego bundle has its own verification pass. CI must run it with --require-opa.
 scripts/verify_policies.sh               # opa check --strict + opa fmt + opa test
+
+# Milestone-5 verification. Each reports what its result actually proves.
+python3 scripts/verify_release_gates.py  # Zero-Trust §11.1, 20 gates
+python3 scripts/run_redteam.py           # adversarial corpus (TM-10)
+python3 scripts/fuzz_parsers.py          # the Python parsers on untrusted input
+scripts/fuzz_native.sh --require-native  # native gate — NO TARGET today (TM-31)
+python3 scripts/run_hil.py               # fail-safe scenarios against the model
+python3 scripts/run_hil.py --require-hardware   # the only form that closes TM-12/TM-27
 ```
+
+> **Read the evidence class, not the exit code.** `run_hil.py` passing against the
+> model says the scenarios and oracles are well-formed; it says nothing about any
+> airframe. `verify_release_gates.py` distinguishes PASS from **NOT MET** for the same
+> reason — a gate whose evidence lives outside this repository is blocking, because
+> "we could not check" is not "we are fine".
 
 ### 10.3 Release gates (Zero-Trust §11.1)
 
